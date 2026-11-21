@@ -37,7 +37,7 @@ to Hyprland's layout coordinates, including on HiDPI screens and multi-monitor s
 On the Linux machine:
 
 ```bash
-git clone https://github.com/<you>/hypr-computer && cd hypr-computer
+git clone https://github.com/malik-na/hypr-computer && cd hypr-computer
 ./scripts/install-system.sh
 ```
 
@@ -49,7 +49,7 @@ the `ydotool` user service. It's safe to run more than once.
 Then install the plugin in Claude Code:
 
 ```bash
-claude plugin marketplace add <you>/hypr-computer
+claude plugin marketplace add malik-na/hypr-computer
 claude plugin install hypr-computer@hypr-computer
 ```
 

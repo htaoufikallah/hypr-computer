@@ -3,7 +3,18 @@
   "displayName": "Hypr Computer",
   "version": "0.1.0",
   "description": "Computer use for Hyprland on Linux: screenshots, clicks, typing and shortcuts through an MCP server.",
-  "author": { "name": "Naeem Malik" },
+  "author": {
+    "name": "Naeem Malik"
+  },
   "license": "MIT",
-  "keywords": ["computer-use", "hyprland", "wayland", "linux", "mcp", "omarchy"]
+  "keywords": [
+    "computer-use",
+    "hyprland",
+    "wayland",
+    "linux",
+    "mcp",
+    "omarchy"
+  ],
+  "homepage": "https://github.com/malik-na/hypr-computer",
+  "repository": "https://github.com/malik-na/hypr-computer"
 }
