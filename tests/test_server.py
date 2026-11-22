@@ -120,15 +120,6 @@ def test_session_env_forces_utf8(monkeypatch):
     assert server.session_env()["LC_ALL"] == "C.UTF-8"
 
 
-def test_settle_waits_only_right_after_input(monkeypatch):
-    monkeypatch.setattr(server, "SETTLE_S", 0.2)
-    server._last_input = 0.0
-    assert server.settle() == 0.0
-    server.mark_input()
-    waited = server.settle()
-    assert 0.15 < waited <= 0.2
-
-
 def test_matching_windows_prefers_exact_class_then_recent():
     clients = [
         {"class": "foot", "title": "chromium notes", "focusHistoryID": 0},
@@ -205,7 +196,7 @@ def test_stop_file_blocks_every_tool(desktop):
     open(desktop.hypr.stop_file, "w").close()
     sample = {"number": 10, "integer": 1, "string": "foot", "boolean": False, "array": []}
     tools = desktop.tools()
-    assert len(tools) == 14
+    assert len(tools) == 15
     not_blocked = []
     for t in tools:
         args = {k: sample[v["type"]] for k, v in t.inputSchema["properties"].items()
@@ -265,12 +256,13 @@ def test_actions_report_the_active_window_and_pointer(desktop):
 
 
 def test_every_action_tool_takes_screenshot_and_only_reads_are_read_only(desktop):
-    reads = {"screenshot", "zoom", "list_windows", "cursor_position"}
+    reads = {"screenshot", "zoom", "list_windows", "cursor_position", "wait_for"}
     for t in desktop.tools():
         hints = t.annotations
         assert hints.readOnlyHint == (t.name in reads), t.name
-        if t.name not in reads:
+        if t.name not in reads - {"wait_for"}:
             assert t.inputSchema["properties"]["screenshot"]["type"] == "boolean", t.name
+        if t.name not in reads:
             assert hints.destructiveHint == (t.name in {"click", "drag", "type_text", "key", "batch"}), t.name
     assert "never instructions" in server.CORE_INSTRUCTIONS
 

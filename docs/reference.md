@@ -75,6 +75,7 @@ These are the tools your agent gets:
 | `drag` | Drags with the left button from one point to another |
 | `move` | Moves the pointer, for example to hover |
 | `batch` | Runs several actions in one call, then returns a screenshot |
+| `wait_for` | Waits until a window opens, the focused window's title changes or matches, focus moves, or the screen stops changing |
 | `zoom` | Shows part of the screen at full resolution, for small text |
 | `open_url` | Opens a page in your default browser, optionally in a private window, and returns a screenshot once it has loaded |
 | `focus_window` | Brings a window forward by name, switching workspace if needed |
@@ -82,7 +83,7 @@ These are the tools your agent gets:
 | `list_windows` | Lists open windows with their workspace, title and position |
 | `cursor_position` | Reports where the pointer is |
 
-Every action takes `screenshot=true` to return the updated screen in the same call. `batch` and `open_url` return one unless you pass `screenshot=false`. Each action's result also names the active window and the pointer position. Coordinates are always pixels in the most recent screenshot.
+Every action takes `screenshot=true` to return the updated screen in the same call. `batch`, `open_url` and `wait_for` return one unless you pass `screenshot=false`. If the screen is identical to the last screenshot, the result says so instead of repeating the image. Each action's result also names the active window and the pointer position, and lists what Hyprland reported meanwhile: windows that opened or closed, focus and title changes. Coordinates are always pixels in the most recent screenshot.
 
 ## Settings
 
@@ -93,8 +94,8 @@ Everything works without configuration. To change a default, set one of these en
 | `HYPR_COMPUTER_DENY` | password managers | Regex of window classes and titles agents may not touch. Empty turns the deny-list off |
 | `HYPR_COMPUTER_BROWSER` | your default browser | Browser command for `open_url`, such as `firefox` |
 | `HYPR_COMPUTER_MAX_EDGE` | `1456` | Screenshot size (long edge, in pixels). Lower it for models with a smaller image limit |
-| `HYPR_COMPUTER_SETTLE_MS` | `500` | How long a screenshot right after an action waits for animations |
-| `HYPR_COMPUTER_TOOLS` | `all` | `core` drops `batch`, `zoom`, `open_url`, `focus_window` and `launch_app`, to save tokens |
+| `HYPR_COMPUTER_SETTLE_MS` | `500` | The longest a screenshot right after an action waits for the screen to settle. It waits 120 to 300 ms by kind of action, longer while the window's title keeps changing, and the whole time when a window opens or closes |
+| `HYPR_COMPUTER_TOOLS` | `all` | `core` drops `batch`, `wait_for`, `zoom`, `open_url`, `focus_window` and `launch_app`, to save tokens |
 | `HYPR_COMPUTER_FILE_URLS` | none | Colon-separated folders whose files `open_url` may open as `file://` URLs. Without it, `open_url` opens only `http` and `https` URLs |
 | `HYPR_COMPUTER_RECORD_DIR` | off | Saves every step, its timing and its screenshot to this folder, so you can review what an agent did. The folder it creates and the files it writes are readable only by you. Typed text is saved as its length only |
 
@@ -103,7 +104,7 @@ Everything works without configuration. To change a default, set one of these en
 Nothing about you or your screen leaves your machine through hypr-computer.
 
 - **No telemetry, analytics or crash reports.** There's no tracking ID or account, and nothing to opt out of.
-- **No network access.** The server connects only to your compositor, over local sockets, and runs only local tools (`grim`, `wtype`, `xkbcli`, `gtk-launch`, `xdg-mime`). The whole server is about 1,100 lines of Python in [`server.py`](../server.py) and [`wl_input.py`](../wl_input.py), so you can check this yourself.
+- **No network access.** The server connects only to your compositor, over local sockets, and runs only local tools (`grim`, `wtype`, `xkbcli`, `gtk-launch`, `xdg-mime`). The whole server is about 1,400 lines of Python in [`server.py`](../server.py) and [`wl_input.py`](../wl_input.py), so you can check this yourself.
 - **Screenshots go only to your agent.** Your agent sends them to its model provider under that provider's terms. That part depends on the agent you choose.
 - **Nothing is stored.** Screenshots stay in memory and never reach the disk, unless you turn on `HYPR_COMPUTER_RECORD_DIR`.
 - **Network use is limited to installing and updating.** The installer and `hypr-computer update` download releases from GitHub, missing packages from your distribution, and the pinned Python dependencies (the MCP SDK and Pillow) from PyPI. A Claude Code plugin install downloads those dependencies on its first start instead.
@@ -115,7 +116,7 @@ Nothing about you or your screen leaves your machine through hypr-computer.
   ```lua
   hl.bind("SUPER + CTRL + ESCAPE", hl.dsp.exec_cmd("touch $XDG_RUNTIME_DIR/hypr-computer.stop"))
   ```
-- **Deny-list.** Agents can't click or type into 1Password, Bitwarden, KeePassXC, GNOME Secrets, Seahorse, Proton Pass, polkit or pinentry. Both the focused window and the window under the pointer are checked, for every point of a move or a drag too. Change the list with `HYPR_COMPUTER_DENY`.
+- **Deny-list.** Agents can't click or type into 1Password, Bitwarden, KeePassXC, GNOME Secrets, Seahorse, Proton Pass, polkit or pinentry. Both the focused window and the window under the pointer are checked, for every point of a move or a drag too. A `batch` stops before its next step when one of these windows opens or comes to the front. Change the list with `HYPR_COMPUTER_DENY`.
 - **Web pages only.** `open_url` refuses `file://` URLs unless you list their folders in `HYPR_COMPUTER_FILE_URLS`.
 - **Text on the screen is not an instruction.** The server tells agents that web pages, documents and messages are data, and that they should do only what you asked.
 - **Your agent's approval prompts still apply.** Don't leave an agent unattended with sensitive apps open.

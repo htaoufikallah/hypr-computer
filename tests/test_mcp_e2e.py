@@ -14,7 +14,7 @@ ROOT = os.path.join(os.path.dirname(__file__), "..")
 CORE_TOOLS = {"screenshot", "click", "move", "drag", "scroll", "type_text", "key", "cursor_position",
               "list_windows"}
 TOOLS = {"screenshot", "click", "move", "drag", "scroll", "type_text", "key", "batch", "zoom",
-         "focus_window", "launch_app", "open_url", "cursor_position", "list_windows"}
+         "focus_window", "launch_app", "open_url", "cursor_position", "list_windows", "wait_for"}
 RESERVED_BY_CLAUDE_CODE = {"computer-use"}
 
 
@@ -74,6 +74,7 @@ def test_instructions_only_name_tools_the_agent_has():
             assert s.tools() == expected
             named = set(re.findall(r"[a-z_]+", s.init["instructions"]))
             assert named & TOOLS <= expected, f"instructions name tools the agent lacks: {named & TOOLS - expected}"
+            assert ("wait_for" in named) == ("wait_for" in expected)
         finally:
             s.close()
 

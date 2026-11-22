@@ -18,7 +18,7 @@ If you're an agent asked to set up computer use on this machine:
 ## Working on the code
 
 ```bash
-uv run --no-project --with pytest --with 'mcp<2' pytest -q tests   # unit and MCP tests (also run in CI)
+uv run --no-project --with pytest --with 'mcp<2' --with pillow pytest -q tests   # unit and MCP tests (also run in CI)
 bash tests/e2e/update.sh                                          # install, update and rollback, on a Hyprland machine
 python3 bench/run.py --host <machine> --setup-only                # every benchmark check must fail before an agent acts
 scripts/release.sh patch                                          # release a fix: bump, wait for CI, tag, publish

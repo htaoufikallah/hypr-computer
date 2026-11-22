@@ -6,21 +6,26 @@
 # ///
 from __future__ import annotations
 
+import collections
 import contextlib
 import functools
 import glob
+import hashlib
+import inspect
 import io
 import json
 import os
 import re
+import select
 import shlex
 import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from wl_input import VirtualInput  # noqa: E402
@@ -31,6 +36,13 @@ DEFAULT_DENY = (r"1password|bitwarden|keepassxc|org\.gnome\.World\.Secrets|"
                 r"org\.gnome\.seahorse|proton.?pass|polkit|pinentry")
 NOTICE_IDLE_S = 60
 SETTLE_S = int(os.environ.get("HYPR_COMPUTER_SETTLE_MS", "500")) / 1000
+# The slowest repaint measured on the M1 after each kind of input, in Chromium and foot
+# (upper bounds, from frames sampled every 40 ms): typing 104 ms, wheel scrolling 146 ms,
+# keys that scroll the page or close a popup 253 ms, a click that opens a <select> 300 ms.
+SETTLE_FLOOR_S = {"type": 0.12, "move": 0.12, "focus": 0.12, "scroll": 0.16, "key": 0.25,
+                  "click": 0.3, "drag": 0.3, "launch": 0.3, "open_url": 0.3}
+SETTLE_QUIET_S = 0.1  # a page repaints within 45 ms of its new title
+ANIMATED = {"open", "close", "workspace"}  # Hyprland animates these for 300 ms or more
 
 # Linux evdev keycodes (input-event-codes.h).
 KEYCODES: dict[str, int] = {
@@ -259,6 +271,179 @@ def current_layout() -> Layout:
     return layout_from_monitors(hypr_json("monitors"))
 
 
+def clip(text: str, n: int = 60) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= n else text[:n - 1] + "…"
+
+
+@dataclass(frozen=True)
+class Event:
+    t: float
+    kind: str  # open | close | focus | title | workspace
+    window: dict = field(default_factory=dict)  # {address, class, title}, as in Hyprland's clients
+    workspace: str = ""
+
+    def describe(self, deny: re.Pattern | None) -> str:
+        w = self.window
+        if self.kind == "workspace":
+            return f"workspace {self.workspace}"
+        if not w.get("address"):
+            return "focus none"
+        name = w.get("class") or "a window"
+        title = (" (deny-listed)" if denied_window([w], deny) else
+                 f' "{clip(w["title"])}"' if w.get("title") else "")
+        return {"open": f"opened {name}{title}", "close": f"closed {name}",
+                "focus": f"focus {name}{title}", "title": f"title{title}"}[self.kind]
+
+
+class HyprEvents:
+    """Hyprland's event socket (.socket2.sock), read by one background thread that reconnects
+    when Hyprland restarts. Keeps recent window events and the windows they name. Title changes
+    count only for the focused window, so other windows' busy titles don't look like activity."""
+
+    def __init__(self):
+        self.cond = threading.Condition()
+        self.log: collections.deque[Event] = collections.deque(maxlen=256)
+        self.count = 0
+        self.windows: dict[str, dict] = {}
+        self.active = ""
+        self.connected = False
+        self._sock: socket.socket | None = None
+        self._buf = b""
+        self._closed = False
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._thread is None:
+            self._thread = threading.Thread(target=self._run, name="hypr-events", daemon=True)
+            self._thread.start()
+
+    def close(self) -> None:
+        self._closed = True
+        with self.cond:
+            self._drop()
+
+    def _run(self) -> None:
+        while not self._closed:
+            try:
+                s = self._connect()
+            except Exception:  # noqa: BLE001
+                time.sleep(0.5)
+                continue
+            alive = True
+            while alive and not self._closed:
+                try:
+                    select.select([s], [], [], 1.0)
+                    with self.cond:
+                        alive = self._sock is s and self._pump()
+                except Exception:  # noqa: BLE001
+                    break
+            with self.cond:
+                if self._sock is s:
+                    self._drop()
+            time.sleep(0.2)
+
+    def _connect(self) -> socket.socket:
+        env = session_env()
+        path = os.path.join(env["XDG_RUNTIME_DIR"], "hypr", env.get("HYPRLAND_INSTANCE_SIGNATURE", ""),
+                            ".socket2.sock")
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            s.settimeout(2)
+            s.connect(path)
+            clients, active = hypr_json("clients"), hypr_json("activewindow") or {}
+        except BaseException:
+            s.close()
+            raise
+        s.setblocking(False)
+        with self.cond:
+            self._sock, self._buf = s, b""
+            self.windows = {c["address"]: {k: c.get(k) or "" for k in ("address", "class", "title")}
+                            for c in clients if c.get("address")}
+            self.active = active.get("address", "")
+            self.connected = True
+            self.cond.notify_all()
+        return s
+
+    def _drop(self) -> None:
+        if self._sock is not None:
+            self._sock.close()
+        self._sock, self.connected = None, False
+        self.cond.notify_all()
+
+    def _pump(self) -> bool:
+        while self._sock is not None:
+            try:
+                data = self._sock.recv(65536)
+            except BlockingIOError:
+                return True
+            except OSError:
+                return False
+            if not data:
+                return False
+            *lines, self._buf = (self._buf + data).split(b"\n")
+            for line in lines:
+                self._ingest(line.decode(errors="replace"), time.monotonic())
+        return False
+
+    def _add(self, event: Event) -> None:
+        self.log.append(event)
+        self.count += 1
+        self.cond.notify_all()
+
+    def _ingest(self, line: str, now: float) -> None:
+        name, _, data = line.partition(">>")
+        if name == "openwindow":
+            addr, ws, cls, title = (data.split(",", 3) + ["", "", ""])[:4]
+            w = self.windows[f"0x{addr}"] = {"address": f"0x{addr}", "class": cls, "title": title}
+            self._add(Event(now, "open", w, ws))
+        elif name == "closewindow":
+            self._add(Event(now, "close", self.windows.pop(f"0x{data}", {"address": f"0x{data}"})))
+        elif name == "activewindowv2":
+            addr = f"0x{data}" if data else ""
+            if addr != self.active:
+                self.active = addr
+                self._add(Event(now, "focus", self.windows.get(addr, {"address": addr}) if addr else {}))
+        elif name == "windowtitlev2":
+            addr, _, title = data.partition(",")
+            old = self.windows.get(f"0x{addr}", {"address": f"0x{addr}", "class": ""})
+            if old.get("title") != title:
+                w = self.windows[old["address"]] = {**old, "title": title}
+                if w["address"] == self.active:
+                    self._add(Event(now, "title", w))
+        elif name == "workspace":
+            self._add(Event(now, "workspace", workspace=data))
+
+    def sync(self) -> int:
+        with self.cond:
+            if self._sock is not None:
+                self._pump()
+            return self.count
+
+    def since(self, t: float) -> list[Event]:
+        with self.cond:
+            if self._sock is not None:
+                self._pump()
+            return [e for e in self.log if e.t >= t]
+
+    def changed(self, count: int, timeout: float) -> None:
+        with self.cond:
+            self.cond.wait_for(lambda: self.count != count or self._closed, timeout)
+
+    def wait(self, ready, timeout: float):
+        end = time.monotonic() + timeout
+        while True:
+            n = self.sync()
+            hit = ready()
+            left = end - time.monotonic()
+            if hit or left <= 0:
+                return hit
+            self.changed(n, min(left, 0.25))
+
+
+EVENTS = HyprEvents()
+
+
 def move_pointer(layout: Layout, x: float, y: float) -> tuple[int, int]:
     lx, ly = layout.to_logical(x, y)
     dispatch("cursor.move", {"x": lx, "y": ly})
@@ -268,21 +453,32 @@ def move_pointer(layout: Layout, x: float, y: float) -> tuple[int, int]:
 
 _input: VirtualInput | None = None
 _last_action = 0.0
-_last_input = 0.0
+_last_input = (0.0, 0.0)  # (when, settle floor) of the last input
 
 
-def mark_input() -> None:
+def mark_input(kind: str) -> None:
     global _last_input
-    _last_input = time.monotonic()
+    _last_input = (time.monotonic(), SETTLE_FLOOR_S[kind])
 
 
-def settle() -> float:
-    wait = SETTLE_S - (time.monotonic() - _last_input)
-    if wait > 0:
-        with spent("settle_ms"):
-            time.sleep(wait)
-        return wait
-    return 0.0
+def settle() -> None:
+    """Wait out the floor for the last input, and SETTLE_QUIET_S past each title or focus
+    change since the last action began; SETTLE_S past a window opening or closing or a
+    workspace switch, for the compositor's animation. Never more than SETTLE_S in all.
+    Without the event socket, wait until SETTLE_S after the last input."""
+    t, floor = _last_input
+    start = time.monotonic()
+    with spent("settle_ms"):
+        while True:
+            n = EVENTS.sync()
+            end = t + SETTLE_S
+            if EVENTS.connected:
+                end = min(start + SETTLE_S, max([t + floor, *(e.t + (SETTLE_S if e.kind in ANIMATED else SETTLE_QUIET_S)
+                                                             for e in EVENTS.since(min(t, _last_action)))]))
+            left = end - time.monotonic()
+            if left <= 0:
+                return
+            EVENTS.changed(n, left)
 
 
 def vinput() -> VirtualInput:
@@ -293,7 +489,7 @@ def vinput() -> VirtualInput:
     return _input
 
 
-def with_input(fn):
+def with_input(kind: str, fn):
     global _input
     try:
         return fn(vinput())
@@ -301,7 +497,7 @@ def with_input(fn):
         _input = None
         return fn(vinput())
     finally:
-        mark_input()
+        mark_input(kind)
 
 
 def guard(point: tuple[int, int] | None = None) -> None:
@@ -328,10 +524,12 @@ def guard(point: tuple[int, int] | None = None) -> None:
 
 
 PPM_HEADER = re.compile(rb"P6\s+(\d+)\s+(\d+)\s+255\s")
+UNCHANGED = ("Screen unchanged: identical to the last screenshot, so no new image (call screenshot "
+             "to see it again). The action had no visible effect (yet).")
+_shown: bytes | None = None  # digest of the last screenshot the agent was sent
 
 
-def capture() -> tuple[bytes, str]:
-    settle()
+def frame() -> tuple[Layout, object, bytes]:
     lay = current_layout()
     size = lay.shot_size
     with spent("capture_ms"):
@@ -343,9 +541,20 @@ def capture() -> tuple[bytes, str]:
         img = Image.frombuffer("RGB", (int(head[1]), int(head[2])), memoryview(raw)[head.end():], "raw", "RGB", 0, 1)
         if img.size != size:
             img = img.resize(size, Image.Resampling.BOX, reducing_gap=1.0)
+        return lay, img, hashlib.blake2b(img.tobytes(), digest_size=16).digest()
+
+
+def capture(skip_unchanged: bool = False) -> tuple[bytes | None, str]:
+    global _shown
+    settle()
+    lay, img, digest = frame()
+    if skip_unchanged and digest == _shown:
+        return None, UNCHANGED
+    _shown = digest
+    with spent("capture_ms"):
         out = io.BytesIO()
         img.save(out, "JPEG", quality=80)
-    return out.getvalue(), (f"Screenshot {size[0]}x{size[1]} px "
+    return out.getvalue(), (f"Screenshot {img.width}x{img.height} px "
                             f"(desktop {int(lay.width)}x{int(lay.height)} logical).")
 
 
@@ -366,7 +575,7 @@ def act_click(x: float, y: float, button: str = "left", count: int = 1) -> str:
     lay = current_layout()
     guard(lay.to_logical(x, y))
     move_pointer(lay, x, y)
-    with_input(lambda v: v.click(button, max(1, min(3, count))))
+    with_input("click", lambda v: v.click(button, max(1, min(3, count))))
     return f"clicked {button} x{count} at ({x}, {y})"
 
 
@@ -374,7 +583,7 @@ def act_move(x: float, y: float) -> str:
     lay = current_layout()
     guard(lay.to_logical(x, y))
     move_pointer(lay, x, y)
-    mark_input()
+    mark_input("move")
     return f"moved to ({x}, {y})"
 
 
@@ -384,7 +593,7 @@ def act_drag(x1: float, y1: float, x2: float, y2: float) -> str:
     for p in path:
         guard(lay.to_logical(*p))
     move_pointer(lay, x1, y1)
-    with_input(lambda v: v.button("left", True))
+    with_input("drag", lambda v: v.button("left", True))
     at = path[0]
     try:
         for p in path[1:]:
@@ -394,7 +603,7 @@ def act_drag(x1: float, y1: float, x2: float, y2: float) -> str:
     except RuntimeError as e:
         raise RuntimeError(f"{e} The drag stopped at ({at[0]:g}, {at[1]:g}), where the button was released.") from None
     finally:
-        with_input(lambda v: v.button("left", False))
+        with_input("drag", lambda v: v.button("left", False))
     return f"dragged ({x1}, {y1}) -> ({x2}, {y2})"
 
 
@@ -406,7 +615,7 @@ def act_scroll(x: float, y: float, direction: str = "down", amount: int = 3) -> 
     lay = current_layout()
     guard(lay.to_logical(x, y))
     move_pointer(lay, x, y)
-    with_input(lambda v: v.scroll(dx, dy))
+    with_input("scroll", lambda v: v.scroll(dx, dy))
     return f"scrolled {direction} {amount} at ({x}, {y})"
 
 
@@ -414,19 +623,19 @@ def act_type(text: str) -> str:
     guard()
     for kind, part in text_runs(text):
         if kind == "vk":
-            with_input(lambda v, p=part: v.type_ascii(p))
+            with_input("type", lambda v, p=part: v.type_ascii(p))
         else:
             # wtype uploads a keymap per call; lead with a throwaway Shift tap
             # because Chromium drops the first key after a keymap change.
             run("wtype", "-k", "Shift_L", "-d", "10", "--", part)
-            mark_input()
+            mark_input("type")
     return f"typed {len(text)} characters"
 
 
 def act_key(combo: str) -> str:
     codes = parse_combo(combo)
     guard()
-    with_input(lambda v: v.chord(codes))
+    with_input("key", lambda v: v.chord(codes))
     return f"pressed {combo}"
 
 
@@ -436,8 +645,82 @@ def act_wait(ms: int = 500) -> str:
     return f"waited {ms} ms"
 
 
+class WaitTimeout(Exception):
+    pass
+
+
+WAIT_EVENTS = {"window": "a window opens", "title": "the focused window's title changes",
+               "focus": "focus moves", "stable": "the screen stops changing"}
+
+
+_waited = 0.0  # when the event the last wait_for returned happened; the next waits for a newer one
+
+
+def focused_match(event: str, pattern: re.Pattern) -> Event | None:
+    w = hypr_json("activewindow") or {}
+    fields = (w.get("title"),) if event == "title" else (w.get("class"), w.get("title"))
+    if any(pattern.search(f or "") for f in fields):
+        return Event(time.monotonic(), event, {k: w.get(k) or "" for k in ("address", "class", "title")})
+    return None
+
+
+def happened(event: str, pattern: re.Pattern | None, since: float) -> Event | None:
+    kind = {"window": "open"}.get(event, event)
+    for e in EVENTS.since(since):
+        w = EVENTS.windows.get(e.window.get("address"), e.window) if kind == "open" else e.window
+        if e.t > since and e.kind == kind and (pattern is None or any(pattern.search(w.get(k) or "")
+                                                                      for k in ("class", "title"))):
+            return Event(e.t, e.kind, w)
+    return None
+
+
+def screen_stable(timeout: float) -> Event | None:
+    end = time.monotonic() + timeout
+    settle()
+    last = None
+    while True:
+        digest = frame()[2]
+        if digest == last:
+            return Event(time.monotonic(), "stable")
+        last = digest
+        if time.monotonic() >= end:
+            return None
+        time.sleep(0.05)
+
+
+def act_wait_for(event: str, match: str = "", timeout_ms: int = 5000) -> str:
+    if event not in WAIT_EVENTS:
+        raise ValueError(f"event must be one of {', '.join(WAIT_EVENTS)}")
+    try:
+        pattern = re.compile(match, re.I) if match else None
+    except re.error as e:
+        raise ValueError(f"match is not a valid regex: {e}") from None
+    global _waited
+    timeout = max(0, min(30000, int(timeout_ms))) / 1000
+    since = max(_last_action, _waited) or time.monotonic()
+    t0 = time.monotonic()
+    if event == "stable":
+        hit = screen_stable(timeout)
+    elif pattern is not None and event in ("title", "focus"):
+        hit = EVENTS.wait(lambda: focused_match(event, pattern), timeout)
+    else:
+        hit = EVENTS.wait(lambda: happened(event, pattern, since), timeout)
+    ms = round((time.monotonic() - t0) * 1000)
+    if not hit:
+        raise WaitTimeout(f"timed out after {ms} ms waiting until {WAIT_EVENTS[event]}"
+                          + (f" to match {match!r}" if match else ""))
+    _waited = hit.t
+    return f"{'the screen is stable' if event == 'stable' else hit.describe(deny_pattern())} after {ms} ms"
+
+
 ACTIONS = {"click": act_click, "move": act_move, "drag": act_drag, "scroll": act_scroll,
-           "type": act_type, "key": act_key, "wait": act_wait}
+           "type": act_type, "key": act_key, "wait": act_wait, "wait_for": act_wait_for}
+
+
+def denied_event(events: list[Event]) -> Event | None:
+    pattern = deny_pattern()
+    return next((e for e in events if e.kind in ("open", "focus", "title") and denied_window([e.window], pattern)),
+                None)
 
 
 def run_steps(steps: list[dict]) -> tuple[list[str], bool]:
@@ -448,12 +731,35 @@ def run_steps(steps: list[dict]) -> tuple[list[str], bool]:
         if name not in ACTIONS:
             log.append(f"step {i}: unknown action {name!r}; use one of {', '.join(ACTIONS)}. Stopped.")
             return log, False
+        started = time.monotonic()
         try:
             log.append(f"step {i}: {ACTIONS[name](**step)}")
         except Exception as e:  # noqa: BLE001
             log.append(f"step {i} ({name}) failed: {e}. Stopped; later steps were not run.")
             return log, False
+        hit = denied_event(EVENTS.since(started))
+        if hit and i < len(steps):
+            what = "opened" if hit.kind == "open" else "came to the front"
+            log.append(f"Stopped before step {i + 1}: {hit.window.get('class') or 'a window'}, which is on the "
+                       f"deny-list (HYPR_COMPUTER_DENY), {what}. Ask the user to deal with it; later steps "
+                       "were not run.")
+            return log, False
     return log, True
+
+
+def events_line(events: list[Event]) -> str:
+    pattern = deny_pattern()
+    kept: list[tuple[Event, str]] = []
+    for e in events:
+        said = e.describe(pattern)
+        if kept and e.kind == "title" and kept[-1][0].kind == "title" and kept[-1][0].window["address"] == e.window["address"]:
+            kept[-1] = (e, said)
+        elif not kept or kept[-1][1] != said:
+            kept.append((e, said))
+    said = [s for _, s in kept]
+    if len(said) > 6:
+        said = [f"{len(said) - 5} earlier"] + said[-5:]
+    return "\nEvents: " + "; ".join(said) + "." if said else ""
 
 
 def matching_windows(clients: list[dict], query: str) -> list[dict]:
@@ -571,15 +877,6 @@ def page_ready(before: tuple[str, str], now: tuple[str, str]) -> bool:
     return now != before and bool(now[0]) and not BLANK_TITLES.match(now[1].split(" - ")[0].strip())
 
 
-def wait_for_page(before: tuple[str, str], timeout: float) -> float:
-    t0 = time.monotonic()
-    while time.monotonic() - t0 < timeout:
-        if page_ready(before, active_window_key()):
-            break
-        time.sleep(0.1)
-    return time.monotonic() - t0
-
-
 PLUGIN_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".claude-plugin", "plugin.json")
 
 
@@ -656,7 +953,9 @@ Controls a Linux (Hyprland) desktop. Every turn is slow, so use as few calls as 
 INSTRUCTIONS = CORE_INSTRUCTIONS + """
 - Web pages: open_url(url, private=true for incognito) opens the page and returns a screenshot.
 - Apps: focus_window or launch_app, not hunting for them in screenshots.
-- When you know the next few actions (click a field, type, press Return), send them in one batch."""
+- When you know the next few actions (click a field, type, press Return), send them in one batch.
+- To wait for a page to load, a window to open or the screen to settle, use wait_for (or a wait_for
+  step in a batch), not fixed waits or extra screenshots."""
 
 
 def build_server():
@@ -665,6 +964,7 @@ def build_server():
 
     core_only = os.environ.get("HYPR_COMPUTER_TOOLS", "all").strip().lower() == "core"
     mcp = FastMCP("hypr-computer", instructions=CORE_INSTRUCTIONS if core_only else INSTRUCTIONS)
+    EVENTS.start()
 
     def tool(*, read_only: bool = False, destructive: bool = False, open_world: bool | None = None,
              extra: bool = False):
@@ -672,20 +972,23 @@ def build_server():
             if extra and core_only:
                 return fn
 
+            reports = "screenshot" in inspect.signature(fn).parameters
+
             @functools.wraps(fn)
             def call(**args):
                 _spent.clear()
                 t0 = time.perf_counter()
+                started = time.monotonic()
                 try:
                     check_stop()
                     out = fn(**args)
                     text, image = out if isinstance(out, tuple) else (out, None)
-                    if not read_only:
+                    if reports:
                         try:
                             if args.get("screenshot"):
-                                image, info = capture()
+                                image, info = capture(skip_unchanged=True)
                                 text += "\n" + info
-                            text += "\n" + state_line()
+                            text += events_line(EVENTS.since(started)) + "\n" + state_line()
                         except Exception as e:  # noqa: BLE001
                             text += f"\n(Done, but reading the screen afterwards failed: {e})"
                     text += update_note()
@@ -749,11 +1052,26 @@ def build_server():
         (by default) return a screenshot. Prefer this whenever you already know the next
         few actions. Each step is {"action": NAME, ...args}, NAME one of:
         click{x,y,button?,count?} move{x,y} drag{x1,y1,x2,y2} scroll{x,y,direction?,amount?}
-        type{text} key{combo} wait{ms}.
+        type{text} key{combo} wait{ms} wait_for{event,match?,timeout_ms?}. Stops before the next
+        step if a deny-listed window opens or comes to the front.
         Example: [{"action":"key","combo":"ctrl+l"},{"action":"type","text":"example.com\\n"},
-        {"action":"wait","ms":800}]"""
+        {"action":"wait_for","event":"title"}]"""
         log, ok = run_steps(steps)
         return "\n".join(log) + ("" if ok else "\n(batch stopped early)")
+
+    @tool(read_only=True, extra=True)
+    def wait_for(event: str, match: str = "", timeout_ms: int = 5000, screenshot: bool = True):
+        """Wait until something happens, instead of a fixed wait or another screenshot. event:
+        window (a window opens), title (the focused window's title changes, e.g. a page loaded),
+        focus (focus moves to another window), stable (the screen stops changing).
+        match: a regex. For window, the new window's class or title must match; for title and
+        focus, waits until the focused window's title (or class) matches. Counts what happened
+        since your last action, so a fast change is never missed. Returns what happened and,
+        unless screenshot=false, the screen."""
+        try:
+            return act_wait_for(event, match, timeout_ms)
+        except WaitTimeout as e:
+            return str(e)
 
     @tool(read_only=True, extra=True)
     def zoom(x: float, y: float, width: float, height: float) -> list:
@@ -784,7 +1102,7 @@ def build_server():
             raise RuntimeError(f"Refused: '{hit.get('class')}' is on the deny-list. Ask the user.")
         guard()
         dispatch("focus", {"window": "address:" + w["address"]})
-        mark_input()
+        mark_input("focus")
         return f"focused {w['class']} — {w['title']} (workspace {w['workspace']['name']})"
 
     @tool(extra=True)
@@ -802,8 +1120,8 @@ def build_server():
         if shutil.which("gtk-launch") is None:
             raise RuntimeError("gtk-launch is not installed (it comes with GTK 3)")
         dispatch("exec_cmd", "gtk-launch " + shlex.quote(did))
-        mark_input()
-        return f"launched {did}; take a screenshot once it has opened"
+        mark_input("launch")
+        return f'launched {did}; wait_for(event="window") returns once it has opened'
 
     @tool(open_world=True, extra=True)
     def open_url(url: str, private: bool = False, wait_ms: int = 8000, screenshot: bool = True):
@@ -815,8 +1133,8 @@ def build_server():
         cmd = " ".join(shlex.quote(a) for a in browser_command(private) + [url])
         before = active_window_key()
         dispatch("exec_cmd", cmd)
-        wait_for_page(before, max(0, min(15000, int(wait_ms))) / 1000)
-        mark_input()
+        EVENTS.wait(lambda: page_ready(before, active_window_key()), max(0, min(15000, int(wait_ms))) / 1000)
+        mark_input("open_url")
         return f"opened {url}" + (" in a private window" if private else "")
 
     @tool(read_only=True)
