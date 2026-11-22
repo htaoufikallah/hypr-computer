@@ -2,6 +2,7 @@
 
 - **Screenshots** come from `grim` at full resolution. [Pillow](https://python-pillow.org) scales them down to a size the model won't shrink again, which takes about half the time of `grim`'s own scaling. That keeps screenshot pixels mapped exactly onto your layout, HiDPI and multiple monitors included.
 - **Window, monitor and pointer information** comes straight from Hyprland's IPC socket, one short connection per request. A request takes about 0.1 ms, where starting `hyprctl` takes 4 to 5 ms.
+- **Waiting** follows Hyprland's event socket, which reports windows opening and closing, focus and title changes. A screenshot after an action waits a short floor measured for that kind of action, longer while the window's title keeps changing, and through the animation when a window opens or closes. `wait_for` returns as soon as the awaited event arrives.
 - **Pointer placement** uses Hyprland's own cursor dispatcher, so pointer acceleration can't throw it off.
 - **Clicks, scrolling and typing** go through [`wl_input.py`](../wl_input.py), a small Wayland client that creates a virtual pointer and keyboard through the standard `zwlr_virtual_pointer_v1` and `zwp_virtual_keyboard_v1` protocols. A click takes about 7 ms.
   - The keyboard uses its own US keymap, so shortcuts and ASCII text come out right whatever layout you've selected.
