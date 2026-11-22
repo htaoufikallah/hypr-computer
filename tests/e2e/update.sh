@@ -19,7 +19,7 @@ export UV_CACHE_DIR="${UV_CACHE_DIR:-$HOME/.cache/uv}" UV_PYTHON_INSTALL_DIR="${
 export HOME="$T/home" HYPR_COMPUTER_REPO="$T/repo.git"
 mkdir -p "$HOME/.local/bin"
 
-release() {  # release VERSION [broken]
+release() {
   sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"$1\"/" .claude-plugin/plugin.json
   [ "${2:-}" = broken ] && sed -i 's/REQUIRED_TOOLS = ("hyprctl"/REQUIRED_TOOLS = ("no-such-tool", "hyprctl"/' server.py
   git add -A && git commit -qm "v$1" && git tag "v$1" && git push -q "$T/repo.git" HEAD:refs/heads/main "v$1"
@@ -28,7 +28,6 @@ git clone -q "$SRC" "$T/src" && cd "$T/src" && git checkout -q "$(git -C "$SRC" 
 git init -q --bare "$T/repo.git"
 release 9.8.0
 
-# Another hypr-computer server running elsewhere, as on a machine with an open agent.
 bash -c 'exec -a "python /tmp/elsewhere/hypr-computer/server.py" sleep 300' &
 decoy=$!
 trap 'kill $decoy 2>/dev/null; rm -rf "$T"' EXIT

@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
-# System packages for hypr-computer on Arch and Arch Linux ARM (including Omarchy).
-# Input goes through Wayland's virtual pointer/keyboard protocols, so no uinput
-# access, udev rule or daemon is needed. This only installs missing packages,
-# and only asks for sudo if something is actually missing. Safe to re-run.
 set -euo pipefail
 
 say() { printf '\033[1m==>\033[0m %s\n' "$*"; }

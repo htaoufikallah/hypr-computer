@@ -31,8 +31,8 @@ for arg in "$@"; do
     --dir=*) DIR="${arg#*=}" ;;
     --update) UPDATE=1 YES=1 ;;
     --ref=*) REF="${arg#*=}" ;;
-    --from=*) FROM="${arg#*=}" FETCHED=1 ;;  # internal: set by the re-exec after an update
-    -h|--help) sed -n '2,19p' "$0" 2>/dev/null || echo "see $REPO"; exit 0 ;;
+    --from=*) FROM="${arg#*=}" FETCHED=1 ;;
+    -h|--help) sed -n '2,/^[^#]/s/^# \{0,1\}//p' "$0" 2>/dev/null || echo "see $REPO"; exit 0 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -46,7 +46,6 @@ die()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 run()  { if [ "$DRY" = 1 ]; then info "[dry-run] $*"; else "$@"; fi; }
 version_of() { sed -n 's/.*"version": *"\([^"]*\)".*/v\1/p' "$1/.claude-plugin/plugin.json" 2>/dev/null | head -1 || true; }
 
-# ---------------------------------------------------------------- preflight
 step "Checking this machine"
 command -v hyprctl >/dev/null || die "hyprctl not found: hypr-computer needs Hyprland."
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
@@ -66,9 +65,7 @@ if [ "$SYSTEM" = 1 ] && [ "${#MISSING[@]}" -gt 0 ] && ! command -v pacman >/dev/
   die "missing ${MISSING[*]}; install them with your package manager, then re-run with --no-system."
 fi
 
-# ------------------------------------------------------------------- plan
-# Detect agents the user has actually used, by their config folders. Checking
-# `command -v` is not enough: Omarchy (mise "lazy" tools) puts shims on PATH for
+# Checking `command -v` is not enough: Omarchy (mise "lazy" tools) puts shims on PATH for
 # agents that aren't installed yet, and running one downloads the whole agent.
 detect() {
   local found=()
@@ -82,7 +79,6 @@ detect() {
 [ "$CLIENTS" = "auto" ] && CLIENTS=$(detect)
 [ "$CLIENTS" = "none" ] && CLIENTS=""
 
-# The newest release tag (v1.2.3), so users only ever get tagged, tested code.
 if [ -z "$REF" ] && [ "$FETCHED" = 0 ]; then
   REF=$(git ls-remote --tags --refs "$REPO" 'v*' 2>/dev/null | sed 's#.*refs/tags/##' | sort -V | tail -1 || true)
   REF=${REF:-main}
@@ -98,7 +94,7 @@ if [ "$SYSTEM" = 1 ] && [ "${#MISSING[@]}" -gt 0 ]; then
 else
   info "2. no system changes needed (no sudo)"
 fi
-info "3. run a read-only self-check"
+info "3. run a self-check (it clicks nothing and types no text)"
 info "4. register the MCP server with: ${CLIENTS:-no clients}"
 if [ "$YES" = 0 ] && [ "$DRY" = 0 ]; then
   [ -r /dev/tty ] || die "no terminal to confirm on; re-run with --yes"
@@ -107,7 +103,6 @@ if [ "$YES" = 0 ] && [ "$DRY" = 0 ]; then
 fi
 fi
 
-# --------------------------------------------------------------- download
 if [ "$FETCHED" = 0 ]; then
 step "Downloading $REF to $DIR"
 if [ -d "$DIR/.git" ]; then
@@ -117,7 +112,6 @@ if [ -d "$DIR/.git" ]; then
     run sh -c "git -C '$DIR' diff HEAD > '$patch'"
     warn "local edits in $DIR were saved to $patch and will be replaced"
   fi
-  # Fetch exactly the wanted ref; works on shallow clones and after force-pushes.
   if git ls-remote --exit-code --tags --refs "$REPO" "refs/tags/$REF" >/dev/null 2>&1; then
     run git -C "$DIR" fetch --quiet --depth 1 --force origin "refs/tags/$REF:refs/tags/$REF"
   else
@@ -129,7 +123,7 @@ elif [ -e "$DIR" ] && [ ! -f "$DIR/server.py" ]; then
 elif command -v git >/dev/null && [ ! -e "$DIR" ]; then
   run mkdir -p "$(dirname "$DIR")"
   run git -c advice.detachedHead=false clone --quiet --depth 1 --branch "$REF" "$REPO" "$DIR"
-else  # no git: unpack a tarball next to the old copy, then swap them
+else
   kind=heads; [ "$REF" = main ] || kind=tags
   if [ "$DRY" = 0 ]; then
     rm -rf "$DIR.new" && mkdir -p "$DIR.new"
@@ -143,12 +137,10 @@ if [ "$DRY" = 0 ] && [ -n "$FROM" ] && [ "$FROM" != prev-dir ] && [ "$(git -C "$
   FROM=""
 elif [ "$DRY" = 0 ]; then
   info "now at $(version_of "$DIR")"
-  # Finish with the installer that was just downloaded, which may know more steps.
   [ -n "$FROM" ] && exec bash "$DIR/install.sh" "${ARGS[@]}" --from="$FROM"
 fi
 fi
 
-# ----------------------------------------------------------------- system
 if [ "$SYSTEM" = 1 ]; then
   step "System packages"
   if [ "$DRY" = 1 ]; then info "[dry-run] $DIR/scripts/install-system.sh"
@@ -156,7 +148,6 @@ if [ "$SYSTEM" = 1 ]; then
 fi
 command -v uv >/dev/null || [ "$DRY" = 1 ] || die "uv is not on PATH; install it and re-run with --no-system"
 
-# ------------------------------------------------------------------ check
 step "Self-check"
 if [ "$DRY" = 1 ]; then info "[dry-run] uv run --quiet --script $DIR/server.py --check"
 elif ! uv run --quiet --script "$DIR/server.py" --check | sed 's/^/    /'; then
@@ -171,7 +162,6 @@ elif ! uv run --quiet --script "$DIR/server.py" --check | sed 's/^/    /'; then
 fi
 [ "$FROM" = prev-dir ] && rm -rf "$DIR.prev"
 
-# ---------------------------------------------------------------- command
 step "The hypr-computer command"
 BIN="$HOME/.local/bin"
 run mkdir -p "$BIN"
@@ -179,13 +169,9 @@ run ln -sfn "$DIR/bin/hypr-computer" "$BIN/hypr-computer"
 info "$BIN/hypr-computer (update, check, stop, resume, version)"
 case ":$PATH:" in *":$BIN:"*) ;; *) warn "$BIN is not on your PATH; add it to use the command" ;; esac
 
-# ---------------------------------------------------------------- clients
 SERVER="$DIR/server.py"
 CMD=(uv run --quiet --script "$SERVER")
 
-# Writes the hypr-computer entry straight into a client's config file, so the
-# client never has to run (a mise "lazy" agent would download itself if it did).
-# write_config KIND FILE: KIND is mcpServers | cursor | opencode | codex.
 write_config() {
   local kind="$1" file="$2"
   if [ "$DRY" = 1 ]; then info "[dry-run] add hypr-computer to $file"; return; fi
@@ -282,7 +268,6 @@ if agent claude plugin list 2>/dev/null | grep -q "hypr-computer@hypr-computer";
   run agent claude plugin update hypr-computer@hypr-computer | sed 's/^/    /'
 fi
 
-# ------------------------------------------------------------------- done
 step "Done"
 info "hypr-computer $(version_of "$DIR") in $DIR. Update any time with: hypr-computer update"
 [ -n "$CLIENTS" ] && info "Restart ${CLIENTS//,/, } to load the hypr-computer tools."

@@ -1,4 +1,3 @@
-"""Unit tests for the pure helpers. Run: uv run --no-project --with pytest --with 'mcp<2' pytest -q tests"""
 import os
 import struct
 import sys
@@ -28,7 +27,7 @@ def test_coordinates_round_trip():
 
 def test_multi_monitor_with_negative_offset_and_rotation():
     left = {"name": "DP-1", "x": -1080, "y": -200, "width": 1920, "height": 1080,
-            "scale": 1, "transform": 1}  # portrait: 1080 wide, 1920 tall
+            "scale": 1, "transform": 1}
     lay = server.layout_from_monitors([MBP, left])
     assert (lay.x0, lay.y0) == (-1080, -200)
     assert (lay.width, lay.height) == (1080 + 1728, 1920)
@@ -78,11 +77,11 @@ def test_us_table_covers_printable_ascii():
 
 
 def test_wayland_string_encoding_is_padded():
-    enc = wl_input._string("wl_seat")  # 7 chars + NUL = 8, already aligned
+    enc = wl_input._string("wl_seat")
     assert struct.unpack("<I", enc[:4])[0] == 8 and len(enc) == 12
-    enc = wl_input._string("abc")  # 3 + NUL = 4
+    enc = wl_input._string("abc")
     assert len(enc) == 8
-    enc = wl_input._string("abcd")  # 4 + NUL = 5 -> padded to 8
+    enc = wl_input._string("abcd")
     assert len(enc) == 12 and enc.endswith(b"\0\0\0\0")
 
 
@@ -169,7 +168,7 @@ def test_desktop_entries(tmp_path, monkeypatch):
 
 def test_record_is_off_by_default_and_local_when_on(tmp_path, monkeypatch):
     monkeypatch.delenv("HYPR_COMPUTER_RECORD_DIR", raising=False)
-    server.record("click", {"x": 1}, "clicked")  # no-op, must not raise
+    server.record("click", {"x": 1}, "clicked")
     monkeypatch.setenv("HYPR_COMPUTER_RECORD_DIR", str(tmp_path / "rec"))
     server.record("click", {"x": 1}, "clicked")
     server.record("screenshot", {}, "shot", b"\xff\xd8jpeg")
@@ -216,21 +215,21 @@ def test_update_note_once_when_disk_version_changes(tmp_path, monkeypatch):
     pj = tmp_path / "plugin.json"
     pj.write_text('{"version": "1.0.0"}')
     monkeypatch.setattr(server, "PLUGIN_JSON", str(pj))
-    monkeypatch.setattr(server, "VERSION", "1.0.0")
+    monkeypatch.setattr(server, "RUNNING_VERSION", "1.0.0")
     monkeypatch.setattr(server, "_update_noted", False)
     assert server.update_note() == ""
     pj.write_text('{"version": "1.1.0"}')
     note = server.update_note()
     assert "1.1.0 is installed" in note and "restart" in note
-    assert server.update_note() == ""  # only once per session
+    assert server.update_note() == ""
 
 
 def test_lua_literals_survive_quotes_backslashes_and_newlines():
-    assert server.lua({"x": 12, "y": 3.5}) == "{x = 12, y = 3.5}"
-    assert server.lua('say "hi" \\ there\n') == r'"say \034hi\034 \092 there\010"'
-    assert server.lua("café") == '"café"'
+    assert server.lua_literal({"x": 12, "y": 3.5}) == "{x = 12, y = 3.5}"
+    assert server.lua_literal('say "hi" \\ there\n') == r'"say \034hi\034 \092 there\010"'
+    assert server.lua_literal("café") == '"café"'
     with pytest.raises(TypeError):
-        server.lua({"not an identifier": 1})
+        server.lua_literal({"not an identifier": 1})
 
 
 def test_every_hyprctl_dispatch_goes_through_dispatch():

@@ -2,15 +2,6 @@
 # requires-python = ">=3.11"
 # dependencies = ["mcp>=1.10,<2"]
 # ///
-"""hypr-computer: a computer-use MCP server for Hyprland (Wayland).
-
-Screen capture: grim. Pointer position: hyprctl (Hyprland >= 0.55 Lua dispatch).
-Clicks, scrolling, keys and ASCII typing: Wayland virtual pointer/keyboard
-protocols (wl_input.py), so no root, uinput or daemon is needed.
-Non-ASCII text: wtype (optional).
-
-Every coordinate a tool takes or returns is a pixel in the latest screenshot.
-"""
 from __future__ import annotations
 
 import glob
@@ -30,16 +21,12 @@ from wl_input import VirtualInput  # noqa: E402
 
 MAX_EDGE = int(os.environ.get("HYPR_COMPUTER_MAX_EDGE", "1456"))  # stay under model downscaling
 REQUIRED_TOOLS = ("hyprctl", "grim", "xkbcli")
-# Windows the agent may not click or type into (regex on class or title).
 DEFAULT_DENY = (r"1password|bitwarden|keepassxc|org\.gnome\.World\.Secrets|"
                 r"org\.gnome\.seahorse|proton.?pass|polkit|pinentry")
-NOTICE_IDLE_S = 60  # show the on-screen notice when acting after this much idle time
-# A screenshot taken right after input waits until this long after it, so menus,
-# dropdowns and page transitions have finished animating (otherwise the model
-# sees a half-drawn frame and spends a turn re-checking).
+NOTICE_IDLE_S = 60
 SETTLE_S = int(os.environ.get("HYPR_COMPUTER_SETTLE_MS", "500")) / 1000
 
-# Linux evdev keycodes (input-event-codes.h), interpreted with our own US keymap.
+# Linux evdev keycodes (input-event-codes.h).
 KEYCODES: dict[str, int] = {
     "ctrl": 29, "control": 29, "shift": 42, "alt": 56, "altgr": 100,
     "super": 125, "win": 125, "meta": 125, "cmd": 125, "logo": 125,
@@ -57,7 +44,7 @@ KEYCODES.update({c: n for c, n in zip("asdfghjkl", range(30, 39))})
 KEYCODES.update({c: n for c, n in zip("zxcvbnm", range(44, 51))})
 KEYCODES.update({f"f{i}": 58 + i for i in range(1, 11)})
 KEYCODES.update({"f11": 87, "f12": 88})
-KEYCODES.update({  # common alternative names models use
+KEYCODES.update({
     "plus": 13, "pgup": 104, "pgdn": 109, "del": 111, "bksp": 14, "ins": 110,
     "comma": 51, "period": 52, "dot": 52, "slash": 53, "semicolon": 39, "apostrophe": 40,
     "quote": 40, "grave": 41, "backtick": 41, "backslash": 43, "bracketleft": 26,
@@ -69,12 +56,8 @@ KEYCODES.update({  # common alternative names models use
 })
 
 
-# ---------------------------------------------------------------- pure helpers
-
-
 @dataclass(frozen=True)
 class Layout:
-    """Bounding box of all monitors in Hyprland layout (logical) coordinates."""
     x0: float
     y0: float
     width: float
@@ -82,7 +65,6 @@ class Layout:
 
     @property
     def factor(self) -> float:
-        """Screenshot pixels per logical pixel."""
         return min(1.0, MAX_EDGE / max(self.width, self.height))
 
     def to_logical(self, x: float, y: float) -> tuple[int, int]:
@@ -122,8 +104,6 @@ def parse_combo(combo: str) -> list[int]:
 
 
 def text_runs(text: str) -> list[tuple[str, str]]:
-    """Split text into ('vk', run) parts our US virtual keyboard can type and
-    ('wtype', run) parts it can't (non-ASCII)."""
     runs: list[tuple[str, str]] = []
     for ch in text:
         kind = "vk" if VirtualInput.typeable(ch) else "wtype"
@@ -149,7 +129,6 @@ def denied_window(windows: list[dict], pattern: re.Pattern | None) -> dict | Non
 
 
 def windows_at(clients: list[dict], lx: float, ly: float, workspace_ids: set[int]) -> list[dict]:
-    """Visible windows whose box contains the logical point."""
     out = []
     for c in clients:
         if c.get("workspace", {}).get("id") not in workspace_ids or c.get("hidden"):
@@ -160,11 +139,7 @@ def windows_at(clients: list[dict], lx: float, ly: float, workspace_ids: set[int
     return out
 
 
-# ------------------------------------------------------------------- system io
-
-
 def session_env() -> dict:
-    """Environment for talking to the Hyprland session, even from SSH/systemd."""
     env = dict(os.environ)
     run_dir = env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
     if "WAYLAND_DISPLAY" not in env:
@@ -195,8 +170,7 @@ def run(*cmd: str) -> str:
     return r.stdout
 
 
-def lua(value) -> str:
-    """A Python value as a Lua literal."""
+def lua_literal(value) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (int, float)):
@@ -207,13 +181,12 @@ def lua(value) -> str:
     if isinstance(value, dict):
         if not all(isinstance(k, str) and k.isidentifier() for k in value):
             raise TypeError(f"Lua table keys must be identifiers: {list(value)}")
-        return "{" + ", ".join(f"{k} = {lua(v)}" for k, v in value.items()) + "}"
+        return "{" + ", ".join(f"{k} = {lua_literal(v)}" for k, v in value.items()) + "}"
     raise TypeError(f"no Lua literal for {type(value).__name__}")
 
 
 def dispatch(name: str, *args) -> None:
-    """Run hl.dsp.<name>(args...) through hyprctl (Hyprland >= 0.55 Lua dispatchers)."""
-    run("hyprctl", "dispatch", f"hl.dsp.{name}({', '.join(map(lua, args))})")
+    run("hyprctl", "dispatch", f"hl.dsp.{name}({', '.join(map(lua_literal, args))})")
 
 
 def hypr_json(what: str):
@@ -242,7 +215,6 @@ def mark_input() -> None:
 
 
 def settle() -> float:
-    """Sleep until SETTLE_S has passed since the last input; returns seconds waited."""
     wait = SETTLE_S - (time.monotonic() - _last_input)
     if wait > 0:
         time.sleep(wait)
@@ -259,7 +231,6 @@ def vinput() -> VirtualInput:
 
 
 def with_input(fn):
-    """Run fn(VirtualInput); reconnect once if the compositor connection dropped."""
     global _input
     try:
         return fn(vinput())
@@ -271,7 +242,6 @@ def with_input(fn):
 
 
 def guard(point: tuple[int, int] | None = None) -> None:
-    """Safety checks before any input: stop file, deny-list, on-screen notice."""
     global _last_action
     if os.path.exists(stop_file()):
         raise RuntimeError(f"Stopped by the user ({stop_file()} exists). Ask the user before "
@@ -297,12 +267,7 @@ def guard(point: tuple[int, int] | None = None) -> None:
     _last_action = now
 
 
-# --------------------------------------------------------------------- actions
-# Plain functions shared by the individual tools and by batch().
-
-
 def capture() -> tuple[bytes, str]:
-    """Whole-desktop JPEG in screenshot coordinates, after the UI has settled."""
     settle()
     lay = current_layout()
     f = lay.factor
@@ -384,7 +349,6 @@ ACTIONS = {"click": act_click, "move": act_move, "drag": act_drag, "scroll": act
 
 
 def run_steps(steps: list[dict]) -> tuple[list[str], bool]:
-    """Run actions in order; stop at the first failure. Returns (log lines, all_ok)."""
     log: list[str] = []
     for i, step in enumerate(steps, 1):
         step = dict(step)
@@ -394,21 +358,19 @@ def run_steps(steps: list[dict]) -> tuple[list[str], bool]:
             return log, False
         try:
             log.append(f"step {i}: {ACTIONS[name](**step)}")
-        except Exception as e:  # noqa: BLE001 - report the failing step to the model
+        except Exception as e:  # noqa: BLE001
             log.append(f"step {i} ({name}) failed: {e}. Stopped; later steps were not run.")
             return log, False
     return log, True
 
 
 def matching_windows(clients: list[dict], query: str) -> list[dict]:
-    """Windows whose class or title contains query (case-insensitive), best match first."""
     q = query.lower()
     hits = [c for c in clients if q in (c.get("class") or "").lower() or q in (c.get("title") or "").lower()]
     return sorted(hits, key=lambda c: ((c.get("class") or "").lower() != q, c.get("focusHistoryID", 99)))
 
 
 def desktop_entries() -> dict[str, str]:
-    """Installed apps: {display name or id (lowercase): desktop file id}."""
     dirs = [os.path.join(os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share")), "applications")]
     dirs += [os.path.join(d, "applications")
              for d in os.environ.get("XDG_DATA_DIRS", "/usr/local/share:/usr/share").split(":")]
@@ -434,7 +396,6 @@ def desktop_entries() -> dict[str, str]:
 
 
 def desktop_file(did: str) -> str | None:
-    """Path of the desktop file with this id, honouring XDG precedence."""
     dirs = [os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))]
     dirs += os.environ.get("XDG_DATA_DIRS", "/usr/local/share:/usr/share").split(":")
     for d in dirs:
@@ -445,7 +406,6 @@ def desktop_file(did: str) -> str | None:
 
 
 def desktop_execs(path: str) -> dict[str, list[str]]:
-    """Exec commands of a desktop file: {"": main, "<action name>": ...}, field codes removed."""
     out: dict[str, list[str]] = {}
     section, name = None, ""
     for line in open(path, errors="replace"):
@@ -461,13 +421,10 @@ def desktop_execs(path: str) -> dict[str, list[str]]:
 
 
 PRIVATE_FLAGS = {"firefox": "--private-window", "librewolf": "--private-window", "zen": "--private-window",
-                 "floorp": "--private-window", "microsoft-edge": "--inprivate"}  # Chromium family: --incognito
+                 "floorp": "--private-window", "microsoft-edge": "--inprivate"}
 
 
 def browser_command(private: bool) -> list[str]:
-    """Command that opens a URL (appended) in the default browser, optionally in a private window.
-
-    HYPR_COMPUTER_BROWSER overrides the browser (e.g. "chromium --user-data-dir=/tmp/x")."""
     override = os.environ.get("HYPR_COMPUTER_BROWSER")
     if override:
         cmd = shlex.split(override)
@@ -480,7 +437,7 @@ def browser_command(private: bool) -> list[str]:
         if private:
             for name, action in execs.items():
                 if name and ("private" in name or "incognito" in name or "inprivate" in name):
-                    return action  # the browser's own "New private window" action
+                    return action
         if not execs.get(""):
             raise RuntimeError(f"{path} has no Exec line")
         cmd = execs[""]
@@ -503,12 +460,10 @@ def active_window_key() -> tuple[str, str]:
 
 
 def page_ready(before: tuple[str, str], now: tuple[str, str]) -> bool:
-    """A different window or title than before, and not a blank / loading tab."""
     return now != before and bool(now[0]) and not BLANK_TITLES.match(now[1].split(" - ")[0].strip())
 
 
 def wait_for_page(before: tuple[str, str], timeout: float) -> float:
-    """Poll the focused window until a page has loaded into it; returns seconds waited."""
     t0 = time.monotonic()
     while time.monotonic() - t0 < timeout:
         if page_ready(before, active_window_key()):
@@ -517,13 +472,10 @@ def wait_for_page(before: tuple[str, str], timeout: float) -> float:
     return time.monotonic() - t0
 
 
-# ------------------------------------------------------------------- versions
-
 PLUGIN_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".claude-plugin", "plugin.json")
 
 
 def installed_version() -> str:
-    """Version of the code on disk now (it changes when the user updates)."""
     try:
         with open(PLUGIN_JSON) as f:
             return json.load(f)["version"]
@@ -531,28 +483,23 @@ def installed_version() -> str:
         return "unknown"
 
 
-VERSION = installed_version()  # the version this process is running
+RUNNING_VERSION = installed_version()
 _update_noted = False
 
 
 def update_note() -> str:
-    """Once per session: tell the agent this server is older than what's installed."""
     global _update_noted
     if _update_noted:
         return ""
     disk = installed_version()
-    if disk in (VERSION, "unknown"):
+    if disk in (RUNNING_VERSION, "unknown"):
         return ""
     _update_noted = True
-    return (f"\n(Note: hypr-computer {disk} is installed, but this session still runs {VERSION}. "
+    return (f"\n(Note: hypr-computer {disk} is installed, but this session still runs {RUNNING_VERSION}. "
             "Tell the user to restart this agent to load the update.)")
 
 
-# ------------------------------------------------------------------- recording
-
-
 def record(tool: str, args: dict, text: str, image: bytes | None = None) -> None:
-    """Append one step to HYPR_COMPUTER_RECORD_DIR (off unless set; stays on this machine)."""
     out = os.environ.get("HYPR_COMPUTER_RECORD_DIR")
     if not out:
         return
@@ -569,9 +516,6 @@ def record(tool: str, args: dict, text: str, image: bytes | None = None) -> None
                                 "result": text, "screenshot": shot}) + "\n")
     except OSError:
         pass
-
-
-# ----------------------------------------------------------------------- tools
 
 
 CORE_INSTRUCTIONS = """\
@@ -593,7 +537,6 @@ def build_server():
     mcp = FastMCP("hypr-computer", instructions=CORE_INSTRUCTIONS if core_only else INSTRUCTIONS)
 
     def extra_tool():
-        """Register a non-core tool unless HYPR_COMPUTER_TOOLS=core (fewer tool tokens)."""
         return (lambda fn: fn) if core_only else mcp.tool()
 
     def reply(tool: str, args: dict, text: str, with_shot: bool = False):
@@ -725,7 +668,7 @@ def build_server():
         before = active_window_key()
         dispatch("exec_cmd", cmd)
         wait_for_page(before, max(0, min(15000, int(wait_ms))) / 1000)
-        mark_input()  # plus the settle delay before the screenshot, for rendering
+        mark_input()
         return reply("open_url", {"url": url, "private": private},
                      f"opened {url}" + (" in a private window" if private else ""), True)
 
@@ -751,11 +694,7 @@ def build_server():
     return mcp
 
 
-# ------------------------------------------------------------------ self-check
-
-
 def self_check() -> int:
-    """Read-only health check for setup scripts and agents. Never clicks or types."""
     results: list[tuple[bool, str, str]] = []
 
     def fail(msg: str):
@@ -764,7 +703,7 @@ def self_check() -> int:
     def check(name: str, fn) -> None:
         try:
             results.append((True, name, fn() or "ok"))
-        except Exception as e:  # noqa: BLE001 - report every failure, keep going
+        except Exception as e:  # noqa: BLE001
             results.append((False, name, str(e)))
 
     for tool in REQUIRED_TOOLS:
@@ -779,7 +718,7 @@ def self_check() -> int:
 
     def virtual_input() -> str:
         t = time.monotonic()
-        vinput()  # binds the protocols and creates both devices; sends no input
+        vinput()
         return f"virtual pointer + keyboard ready in {1000 * (time.monotonic() - t):.0f} ms"
     check("virtual input (Wayland)", virtual_input)
 
@@ -797,7 +736,7 @@ def self_check() -> int:
     check("not stopped", lambda: fail(f"{stop_file()} exists; delete it to allow actions")
           if os.path.exists(stop_file()) else "ok")
 
-    print(f"hypr-computer {VERSION} ({os.path.dirname(os.path.abspath(__file__))})")
+    print(f"hypr-computer {RUNNING_VERSION} ({os.path.dirname(os.path.abspath(__file__))})")
     for ok, name, detail in results:
         print(f"{'PASS' if ok else 'FAIL'}  {name}: {detail}")
     failed = sum(not ok for ok, _, _ in results)
@@ -807,7 +746,7 @@ def self_check() -> int:
 
 if __name__ == "__main__":
     if "--version" in sys.argv[1:]:
-        print(VERSION)
+        print(RUNNING_VERSION)
         sys.exit(0)
     if "--check" in sys.argv[1:]:
         sys.exit(self_check())

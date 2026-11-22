@@ -52,7 +52,7 @@ It shows what it will do and asks before starting. Then it:
    missing. On Omarchy they're usually all present, so nothing changes. No
    root-level input setup is needed: input goes through standard Wayland
    protocols.
-3. Runs a read-only self-check.
+3. Runs a self-check that clicks nothing and types no text.
 4. Registers the server with each supported agent you've used (it checks for the
    agent's config folder): Claude Code, Codex, opencode, Gemini CLI and Cursor.
 

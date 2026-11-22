@@ -1,4 +1,3 @@
-"""Start the server the way MCP clients do and talk to it over stdio."""
 import json
 import os
 import shutil
