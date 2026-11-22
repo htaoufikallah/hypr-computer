@@ -9,7 +9,7 @@
   - Text with accents or other scripts is typed with `wtype`.
 - **Reading text.** `find_text` and `click_text` run tesseract on the full-resolution capture of the screen or one window, so the positions they return map exactly onto screenshot pixels. A frame that was already read isn't read again. On the M1, reading a 621x750 window takes about 0.3 s, and the whole screen 0.4 to 0.75 s.
 - **Accessibility.** `ui_find` and `ui_act` read AT-SPI through [`atspi_helper.py`](../atspi_helper.py), run by the system Python, which has PyGObject. Each call reads one window, up to 5,000 elements or 3 seconds, and takes 0.1 to 0.25 s on the M1. A position is the window's place in Hyprland plus the element's place in the window, checked against the window's size. When they don't fit, as with GTK4's zeros or Chromium's mix of logical and device pixels, the position is left out rather than guessed.
-- **Deny-listed windows** are found in Hyprland's window list just before and just after each capture, and both places are painted black.
+- **Deny-listed windows** are found in Hyprland's window list just before and just after each capture, and both places are painted black. A capture first waits out Hyprland's own animation time (read from its config) after anything moves, because Hyprland reports where a window is going, not where it is drawn.
 - **Session discovery.** The server finds your Hyprland session on its own, so it works even when the agent runs from SSH, tmux or a systemd service.
 
 ## Benchmarks

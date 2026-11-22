@@ -5,6 +5,7 @@ import os
 import re
 import sys
 import threading
+import time
 
 import pytest
 from PIL import Image
@@ -52,6 +53,8 @@ def test_find_text_says_where_text_is_in_screenshot_pixels_and_in_which_window(o
         first, *rows = ocr.call("find_text", query="DRAFT", window=window).splitlines()
         assert "untrusted" in first
         assert rows == ['1. "draft" at (330, 220), box (320, 200, 20x40) in foot: "Save draft"'], window
+    monkeypatch.setattr(server, "MAX_EDGE", 640)  # screenshots at half the desktop's size
+    assert ocr.call("find_text", query="draft").splitlines()[1].startswith('1. "draft" at (165, 110), box (160, 100, 10x20)')
     ocr.hypr.clients = [FOOT, client("chromium", "Docs", "0xc", (0, 0), (100, 100), workspace=WS3)]
     with pytest.raises(Exception, match="not on screen"):
         ocr.call("find_text", query="draft", window="chromium")
@@ -124,7 +127,8 @@ def test_a_deny_listed_window_is_black_in_every_image_and_unreadable(vault, monk
         assert black < 16 and border < 16 and 20 < background < 45, (black, border, background)
     text, (zoomed,) = vault.result("zoom", x=240, y=140, width=120, height=120)
     assert gray(zoomed, (100, 100))[0] < 16 and 20 < gray(zoomed, (4, 4))[0] < 45
-    assert vault.call("find_text", query="submit") == "No text matching 'submit' on screen."
+    assert vault.call("find_text", query="submit") == ("No text matching 'submit' on screen. "
+                                                       "Black areas hide deny-listed windows (password managers).")
 
     monkeypatch.setenv("HYPR_COMPUTER_DENY", "")
     monkeypatch.setattr(server, "_shown", None)
@@ -148,6 +152,14 @@ def test_deny_listed_titles_never_reach_the_agent(desktop):
         desktop.call("focus_window", query="bank")
 
 
+def test_a_click_on_a_deny_listed_window_in_a_shown_special_workspace_is_refused(desktop):
+    desktop.hypr.monitors = [{**desktop.hypr.monitors[0], "specialWorkspace": {"id": -98, "name": "special:magic"}}]
+    desktop.hypr.clients = [{**KEEPASS, "workspace": {"id": -98, "name": "special:magic"}}]
+    with pytest.raises(Exception, match="deny-list"):
+        desktop.call("click", x=300, y=200)
+    assert desktop.input.events == []
+
+
 def test_capture_is_refused_when_a_deny_listed_window_on_screen_has_no_position(screen):
     screen.hypr.clients = [{**KEEPASS, "size": [0, 0]}]
     for tool, args in (("screenshot", {}), ("zoom", {"x": 0, "y": 0, "width": 10, "height": 10}),
@@ -158,7 +170,7 @@ def test_capture_is_refused_when_a_deny_listed_window_on_screen_has_no_position(
     assert screen.result("screenshot")[1]
 
 
-def test_while_windows_move_the_monitor_of_a_deny_listed_window_is_blacked_out(screen, monkeypatch):
+def test_while_windows_move_with_a_deny_listed_window_open_the_screen_is_blacked_out(screen, monkeypatch):
     monkeypatch.setenv("FAKE_GRIM_MARK", SQUARE)
     screen.hypr.clients = [{**KEEPASS, "workspace": WS3}]  # off screen, but a workspace switch slides it past
     screen.hypr.animations = [[{"name": "global", "overridden": True, "enabled": True, "speed": 30.0}], []]
@@ -170,6 +182,65 @@ def test_while_windows_move_the_monitor_of_a_deny_listed_window_is_blacked_out(s
     monkeypatch.setattr(server, "_shown", None)
     text, (image,) = screen.result("screenshot")
     assert gray(image, (320, 220))[0] > 200 and "Black" not in text
+
+
+def blacked_out(screen) -> str:
+    """The note of a screenshot that is black all over."""
+    server._shown = None
+    text, (image,) = screen.result("screenshot")
+    assert max(gray(image, (320, 220), (10, 10), (1270, 790), (640, 400))) < 16, text
+    return text
+
+
+SLOW = [[{"name": "global", "overridden": True, "enabled": True, "speed": 11.5}], []]  # 1.15 s, past the wait
+
+
+def test_the_screen_goes_black_when_a_deny_listed_window_has_focus_or_is_grouped(vault):
+    vault.hypr.active = KEEPASS
+    assert "has focus" in blacked_out(vault)
+    vault.hypr.active = FOOT
+    vault.hypr.clients = [FOOT, {**KEEPASS, "grouped": ["0xk", "0xf"]}]
+    assert "window group" in blacked_out(vault)
+
+
+def test_the_screen_goes_black_when_a_deny_listed_window_moves_during_the_capture(vault, tmp_path, monkeypatch):
+    def once_captured(change):
+        def on_request(request):
+            if (tmp_path / "shots").exists() and not (tmp_path / "changed").exists():
+                (tmp_path / "changed").touch()
+                change()
+        return on_request
+    monkeypatch.setenv("FAKE_GRIM_MOVING", f"{tmp_path / 'shots'},0")  # counts captures
+    vault.hypr.on_request = once_captured(lambda: setattr(vault.hypr, "clients", [FOOT, {**KEEPASS, "at": [700, 500]}]))
+    assert "moving" in blacked_out(vault)
+
+    def switch_to_its_workspace():  # it slides into view
+        vault.hypr.monitors = [{**vault.hypr.monitors[0], "activeWorkspace": WS3}]
+        vault.hypr.emit("workspace>>3")
+    for path in ("shots", "changed"):
+        (tmp_path / path).unlink()
+    vault.hypr.clients = [FOOT, {**KEEPASS, "workspace": WS3}]
+    vault.hypr.on_request = once_captured(switch_to_its_workspace)
+    assert "moving" in blacked_out(vault)
+
+
+def test_the_screen_goes_black_when_a_deny_listed_window_is_retiled_or_closed_without_time_to_finish(vault):
+    vault.result("screenshot")
+    vault.hypr.animations = SLOW
+    time.sleep(1.3)  # long after anything moved
+    vault.hypr.clients = [FOOT, {**KEEPASS, "at": [700, 500]}]  # Hyprland re-tiles it and sends no event
+    assert "moving" in blacked_out(vault)
+    time.sleep(1.3)
+    vault.hypr.clients = [FOOT]
+    vault.hypr.emit("closewindow>>k")  # it fades out where it was
+    assert "moving" in blacked_out(vault)
+
+
+def test_the_screen_goes_black_while_a_deny_listed_window_that_was_never_captured_fades_out(screen, monkeypatch):
+    monkeypatch.setenv("FAKE_GRIM_MARK", SQUARE)
+    screen.hypr.animations = SLOW
+    screen.hypr.emit("openwindow>>9e11,9,pinentry-gnome3,Unlock OpenPGP key", "closewindow>>9e11")
+    assert "moving" in blacked_out(screen)
 
 
 CHROMIUM = client("chromium", "Probe Page - Chromium", "0xc", (647, 38), (621, 750), pid=4242)
@@ -209,7 +280,7 @@ def atspi(desktop, tmp_path, monkeypatch):
     return desktop
 
 
-def test_ui_find_lists_matching_elements_with_refs_and_screen_positions(atspi):
+def test_ui_find_lists_matching_elements_with_refs_and_screen_positions(atspi, monkeypatch):
     atspi.tree(chromium_page(APPLY, REMEMBER, FAR, toolbar=[RELOAD]))
     first, *rows = atspi.call("ui_find", query="apply").splitlines()
     assert "untrusted" in first
@@ -217,6 +288,8 @@ def test_ui_find_lists_matching_elements_with_refs_and_screen_positions(atspi):
                     'e2 link "Apply elsewhere" (not on screen, or its position is unknown)']
     rows = atspi.call("ui_find", role="button").splitlines()[1:]
     assert rows == ['e3 push button "Reload" at (704, 101)', 'e4 button "Apply changes" at (758, 292)']
+    monkeypatch.setattr(server, "MAX_EDGE", 640)  # screenshots at half the desktop's size
+    assert atspi.call("ui_find", query="apply changes").splitlines()[1] == 'e5 button "Apply changes" at (379, 146)'
 
 
 def test_ui_find_leaves_out_positions_it_cannot_trust(atspi):
@@ -248,6 +321,30 @@ def test_ui_act_clicks_an_element_without_an_action_of_its_own(atspi):
     atspi.call("ui_act", ref="e1")
     assert atspi.hypr.dispatched("cursor.move") == ["/dispatch hl.dsp.cursor.move({x = 758, y = 292})"]
     assert atspi.input.events == [("click", "left", 1)]
+
+
+def test_ui_find_gives_no_positions_in_a_window_that_is_not_on_screen(atspi):
+    atspi.hypr.clients = [{**CHROMIUM, "workspace": WS3}]
+    atspi.tree(chromium_page(APPLY, element("label", "Drop files here", (80, 600, 284, 76))))
+    header, *rows = atspi.call("ui_find", role="button", window="chromium").splitlines()
+    assert "not on screen" in header and rows == ['e1 button "Apply changes" (not on screen, or its position is unknown)']
+    atspi.call("ui_find", query="drop", window="chromium")
+    with pytest.raises(Exception, match="focus_window"):
+        atspi.call("ui_act", ref="e2")
+    assert atspi.input.events == [] and not atspi.hypr.dispatched("cursor.move")
+
+
+def test_ui_find_reads_the_window_it_was_asked_for_and_skips_deny_listed_ones(atspi):
+    vault = element("frame", "Vault | Bitwarden - Chromium", (0, 0, 621, 750), states=("active", "enabled"),
+                    children=[element("button", "Unlock", (10, 10, 50, 20), ["press"])])
+    tree = chromium_page(APPLY)
+    tree["children"][0]["children"].insert(0, vault)
+    atspi.tree(tree)
+    assert atspi.call("ui_find", query="unlock").startswith("No element")
+    atspi.hypr.clients = [{**CHROMIUM, "title": "Probe Page (renamed) - Chromium"}]  # no frame has this name
+    atspi.hypr.active = atspi.hypr.clients[0]
+    assert atspi.call("ui_find", query="unlock").startswith("No element")
+    assert 'button "Apply changes"' in atspi.call("ui_find", query="apply")
 
 
 def test_ui_find_never_reads_deny_listed_windows_or_elements(atspi):

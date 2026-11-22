@@ -537,8 +537,7 @@ def guard(point: tuple[int, int] | None = None) -> None:
     if pattern is not None:
         targets = [hypr_json("activewindow") or {}]
         if point is not None:
-            ws = {m["activeWorkspace"]["id"] for m in hypr_json("monitors")}
-            targets += windows_at(hypr_json("clients"), *point, ws)
+            targets += windows_at(hypr_json("clients"), *point, visible_workspaces(hypr_json("monitors")))
         hit = denied_window(targets, pattern)
         if hit:
             raise RuntimeError(f"Refused: '{hit.get('class')}' is on the deny-list "
@@ -564,7 +563,7 @@ UNLOCATED = ("Refused to capture the screen: a deny-listed window (HYPR_COMPUTER
 ANIMATION_PARENTS = {"windowsIn": "windows", "windowsOut": "windows", "windowsMove": "windows", "windows": "global",
                      "workspacesIn": "workspaces", "workspacesOut": "workspaces", "workspaces": "global",
                      "specialWorkspaceIn": "specialWorkspace", "specialWorkspaceOut": "specialWorkspace",
-                     "specialWorkspace": "workspaces"}
+                     "specialWorkspace": "workspaces", "fadeOut": "fade", "fade": "global"}
 
 
 @dataclass(frozen=True)
@@ -607,12 +606,27 @@ def animation_s() -> float:
     return max(a.get("speed", 10) / 10 if a.get("enabled", True) else 0 for a in leaves) + 0.05  # speed is in 100 ms
 
 
-def calm(limit: float = 1.0) -> bool:
-    """Wait for Hyprland's window animations to end, up to `limit` seconds. False if they didn't."""
-    anim, end = animation_s(), time.monotonic() + limit
+_goals: dict[str, tuple[tuple, float]] = {}  # deny-listed window -> (where Hyprland puts it, when first seen there)
+
+
+def goal(c: dict) -> tuple:
+    return window_box(c), (c.get("workspace") or {}).get("id"), bool(c.get("hidden"))
+
+
+def calm(denied: list[dict], limit: float = 1.0) -> bool:
+    """Wait until Hyprland has finished moving windows, up to `limit` seconds; False if it hasn't. Windows may
+    move for one animation after a layout event, after Hyprland first gives a deny-listed window a new place
+    (swapping or resizing tiles sends no event), and after one disappears (it fades out where it was)."""
+    global _goals
+    now, before = time.monotonic(), _goals
+    _goals = {c.get("address", ""): (goal(c), seen if place == goal(c) else now)
+              for c in denied for place, seen in [before.get(c.get("address", ""), ((), now))]}
+    gone = before.keys() - _goals.keys()
+    since = max([seen for _, seen in _goals.values()] + ([now] if gone else []), default=0.0)
+    anim, end = animation_s(), now + limit
     while EVENTS.connected:
         EVENTS.sync()
-        left = EVENTS.moved_at + anim - time.monotonic()
+        left = max(EVENTS.moved_at, since) + anim - time.monotonic()
         if left <= 0:
             return True
         if time.monotonic() + left > end:
@@ -629,33 +643,48 @@ def window_box(c: dict) -> Box | None:
         return None
 
 
-def hidden_boxes(pattern: re.Pattern, clients: list[dict], monitors: list[dict], moving: bool) -> list[Box]:
-    """Where deny-listed windows may be drawn: their own box on a visible workspace, or, while windows
-    move, all of the monitor they're on."""
-    shown, lay = visible_workspaces(monitors), layout_from_monitors(monitors)
-    screens = {m.get("id"): monitor_box(m) for m in monitors}
+BLACKED_OUT = {
+    "moving": "Windows were moving while a deny-listed window was open, so the whole screen is blacked out; "
+              "take another screenshot.",
+    "focus": "A deny-listed window has focus, so the whole screen is blacked out. Ask the user to finish with it.",
+    "group": "A deny-listed window is in a window group, which shows its title, so the whole screen is blacked out.",
+}
+
+
+def hidden_boxes(pattern: re.Pattern, clients: list[dict], monitors: list[dict],
+                 active: set[str]) -> list[Box] | str:
+    """The boxes of deny-listed windows on screen, or why the whole screen must go black instead: while one
+    has focus, bars and its menus can show its title and content anywhere, and a group bar shows the title
+    of every window in the group."""
+    shown = visible_workspaces(monitors)
     boxes = []
     for c in clients:
-        if not denied_window([c], pattern):
+        if not denied_window([c], pattern) or not ((c.get("workspace") or {}).get("id") in shown or c.get("pinned")):
             continue
-        if moving:
-            boxes.append(screens.get(c.get("monitor"), (lay.x0, lay.y0, lay.width, lay.height)))
-        elif (c.get("workspace") or {}).get("id") in shown or c.get("pinned"):
-            box = window_box(c)
-            if box is None:
-                raise RuntimeError(UNLOCATED)
-            x, y, w, h = box
-            boxes.append((x - DENY_MARGIN, y - DENY_MARGIN, w + 2 * DENY_MARGIN, h + 2 * DENY_MARGIN))
+        if c.get("address") in active:
+            return BLACKED_OUT["focus"]
+        if c.get("grouped"):
+            return BLACKED_OUT["group"]
+        box = window_box(c)
+        if box is None:
+            raise RuntimeError(UNLOCATED)
+        x, y, w, h = box
+        boxes.append((x - DENY_MARGIN, y - DENY_MARGIN, w + 2 * DENY_MARGIN, h + 2 * DENY_MARGIN))
     return boxes
 
 
 def grab() -> Screen:
-    """The screen at full resolution, with deny-listed windows blacked out. Windows are looked up before
-    and after the capture, and both places are painted, so a window moving meanwhile is still covered."""
+    """The screen at full resolution, with deny-listed windows blacked out. Windows are looked up before and
+    after the capture, and both places are painted. If a deny-listed window moved, opened or closed around
+    the capture, the whole screen is blacked out instead."""
     pattern = deny_pattern()
     monitors, clients = hypr_json("monitors"), hypr_json("clients")
     lay = layout_from_monitors(monitors)
-    moving = bool(pattern and any(denied_window([c], pattern) for c in clients)) and not calm()
+    denied = [c for c in clients if denied_window([c], pattern)] if pattern else []
+    watched = bool(denied or _goals) or bool(pattern) and any(
+        e.kind == "close" and denied_window([e.window], pattern) for e in EVENTS.since(time.monotonic() - 5))
+    moving = watched and not calm(denied)
+    active = (hypr_json("activewindow") or {}).get("address") if denied else None
     started = time.monotonic()
     with spent("capture_ms"):
         from PIL import Image, ImageDraw
@@ -667,20 +696,26 @@ def grab() -> Screen:
     if pattern is None:
         return Screen(lay, img, clients, monitors)
     after, after_monitors = hypr_json("clients"), hypr_json("monitors")
-    if any(denied_window([c], pattern) for c in clients + after):
+    denied_after = [c for c in after if denied_window([c], pattern)]
+    hidden: list[Box] | str = []
+    if watched or denied_after:
         EVENTS.sync()
-        moving = moving or not EVENTS.connected or EVENTS.moved_at >= started
-    hidden = hidden_boxes(pattern, clients, monitors, moving) + hidden_boxes(pattern, after, after_monitors, moving)
-    if hidden:
-        with spent("capture_ms"):
+        moving = (moving or not EVENTS.connected or EVENTS.moved_at >= started
+                  or {c.get("address"): goal(c) for c in denied} != {c.get("address"): goal(c) for c in denied_after})
+        actives = {active, (hypr_json("activewindow") or {}).get("address")} - {None, ""}
+        hidden = (BLACKED_OUT["moving"] if moving else
+                  hidden_boxes(pattern, clients + after, monitors + after_monitors, actives))
+    with spent("capture_ms"):
+        if isinstance(hidden, str):
+            img = Image.new("RGB", img.size)
+        elif hidden:
             img = img.copy()
             draw, k = ImageDraw.Draw(img), img.width / lay.width
             for x, y, w, h in hidden:
                 draw.rectangle((math.floor((x - lay.x0) * k), math.floor((y - lay.y0) * k),
                                 math.ceil((x + w - lay.x0) * k) - 1, math.ceil((y + h - lay.y0) * k) - 1), fill=0)
-    note = ("" if not hidden else "Black areas hide deny-listed windows (password managers)." if not moving else
-            "Windows were moving while a deny-listed window was open, so its monitor is blacked out; "
-            "take another screenshot.")
+    note = (hidden if isinstance(hidden, str) else
+            "Black areas hide deny-listed windows (password managers)." if hidden else "")
     return Screen(lay, img, after, after_monitors, note)
 
 
@@ -838,8 +873,11 @@ def ocr(img) -> list[Word]:
     except RuntimeError:
         raise RuntimeError(OCR_MISSING) from None
     with spent("ocr_ms"):
-        r = subprocess.run([exe, "stdin", "stdout", "--psm", "3", "tsv"], input=b"P5\n%d %d\n255\n" % gray.size + data,
-                           env=session_env(), capture_output=True, timeout=60)
+        try:
+            r = subprocess.run([exe, "stdin", "stdout", "--psm", "3", "tsv"], env=session_env(), capture_output=True,
+                               input=b"P5\n%d %d\n255\n" % gray.size + data, timeout=20)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("reading the screen took over 20 s; pass window= to read one window") from None
     if r.returncode != 0:
         raise RuntimeError(f"tesseract failed: {r.stderr.decode(errors='replace').strip()[-300:]}")
     words = []
@@ -878,8 +916,9 @@ def window_class_at(scr: Screen, lx: float, ly: float) -> str:
     return top.get("class", "") if top else ""
 
 
-def read_text(pattern: re.Pattern, window: str = "") -> list[TextHit]:
-    """Text matching `pattern` on the screen, or in one window, read at full resolution, top to bottom."""
+def read_text(pattern: re.Pattern, window: str = "") -> tuple[list[TextHit], str]:
+    """Text matching `pattern` on the screen, or in one window, read at full resolution, top to bottom, and
+    what was blacked out."""
     scr = grab()
     lay = scr.layout
     region = window_box(on_screen_window(scr, window)) if window else (lay.x0, lay.y0, lay.width, lay.height)
@@ -902,24 +941,25 @@ def read_text(pattern: re.Pattern, window: str = "") -> list[TextHit]:
                                   for px, py in ((left, top), (right, bottom)))
             hits.append(TextHit(" ".join(w.text for w in span), text, (x1, y1, x2 - x1, y2 - y1),
                                 window_class_at(scr, *scr.logical(ox + (left + right) / 2, oy + (top + bottom) / 2))))
-    return sorted(hits, key=lambda h: (round(h.centre[1] / 10), h.centre[0]))
+    return sorted(hits, key=lambda h: (round(h.centre[1] / 10), h.centre[0])), scr.note
 
 
-def describe_hits(hits: list[TextHit], query: str) -> str:
+def describe_hits(hits: list[TextHit], query: str, note: str) -> str:
     if not hits:
-        return f"No text matching {query!r} on screen."
+        return f"No text matching {query!r} on screen." + (" " + note if note else "")
     rows = [f'{i}. "{clip(h.text, 40)}" at {h.centre}, box ({h.box[0]}, {h.box[1]}, {h.box[2]}x{h.box[3]})'
             + (f" in {h.window}" if h.window else "") + (f': "{clip(h.line)}"' if h.line != h.text else "")
             for i, h in enumerate(hits[:TEXT_ROWS], 1)]
     more = (f"\n({len(hits) - TEXT_ROWS} more not shown; pass window= or a longer query)"
             if len(hits) > TEXT_ROWS else "")
-    return UNTRUSTED + "\n" + "\n".join(rows) + more
+    return UNTRUSTED + "\n" + "\n".join(rows) + more + ("\n" + note if note else "")
 
 
 def act_click_text(query: str, nth: int = 1, window: str = "") -> str:
-    hits = read_text(text_pattern(query), window)
+    hits, note = read_text(text_pattern(query), window)
     if not 1 <= nth <= len(hits):
-        raise ValueError(f"found {len(hits)} match(es) for {query!r} on screen, so there is no match {nth}")
+        raise ValueError(f"found {len(hits)} match(es) for {query!r} on screen, so there is no match {nth}."
+                         + (" " + note if note else ""))
     hit = hits[nth - 1]
     act_click(*hit.centre)
     return f'clicked "{clip(hit.text, 40)}" at {hit.centre}'
@@ -928,7 +968,7 @@ def act_click_text(query: str, nth: int = 1, window: str = "") -> str:
 def text_shown(pattern: re.Pattern, timeout: float) -> Event | None:
     end = time.monotonic() + timeout
     while True:
-        hits = read_text(pattern)
+        hits = read_text(pattern)[0]
         if hits:
             return Event(time.monotonic(), "text", {"title": hits[0].text})
         if time.monotonic() >= end:
@@ -1241,6 +1281,10 @@ def a11y_target(clients: list[dict], window: str = "", address: str = "") -> dic
     return w
 
 
+def on_screen(w: dict, monitors: list[dict]) -> bool:
+    return (w.get("workspace") or {}).get("id") in visible_workspaces(monitors) and not w.get("hidden")
+
+
 def a11y_request(w: dict, monitors: list[dict], **fields) -> dict:
     scale = next((m["scale"] for m in monitors if m.get("id") == w.get("monitor")), monitors[0]["scale"])
     return {"pid": w["pid"], "title": w["title"], "size": w["size"], "scale": scale, **fields}
@@ -1538,7 +1582,8 @@ def build_server():
         """Find text on screen by OCR: up to 20 matches of query (case-insensitive), top to bottom,
         each with its centre and box in screenshot pixels and the window it's in. window: read only
         the window whose class or title contains this. Cheaper than a screenshot to locate a label."""
-        return describe_hits(read_text(text_pattern(query), window), query)
+        hits, note = read_text(text_pattern(query), window)
+        return describe_hits(hits, query, note)
 
     @tool(destructive=True, extra=True)
     def click_text(query: str, nth: int = 1, window: str = "", screenshot: bool = False):
@@ -1558,9 +1603,11 @@ def build_server():
         clients, monitors = hypr_json("clients"), hypr_json("monitors")
         w = a11y_target(clients, window)
         out = a11y(a11y_request(w, monitors, op="find", query=query.strip(), role=role.strip(), limit=TEXT_ROWS))
-        lay = layout_from_monitors(monitors)
-        rows = [element_line(remember(w, row), row, w, lay) for row in out["rows"]]
-        where = f'{w["class"]} "{clip(w["title"])}"'
+        lay, shown = layout_from_monitors(monitors), on_screen(w, monitors)
+        rows = [element_line(remember(w, row), row if shown else {**row, "centre": None}, w, lay)
+                for row in out["rows"]]
+        where = f'{w["class"]} "{clip(w["title"])}"' + ("" if shown else
+                                                         " (not on screen: focus_window it for positions)")
         tail = ("" if out["complete"] else f"\n(Stopped after {out['nodes']} elements, so some may be missing. "
                 "Narrow the query or role.)")
         if not rows:
@@ -1586,12 +1633,14 @@ def build_server():
                                 action=action.strip()))
         known["path"] = out["path"]
         if "click" in out:
-            if not out["click"]:
-                raise RuntimeError(f'the {known["role"]} "{clip(known["name"])}" has no action and no known '
-                                   "position; use find_text or a screenshot")
+            if not out["click"] or not on_screen(w, monitors):
+                raise RuntimeError(f'the {known["role"]} has no action of its own, and its position on screen '
+                                   "isn't known; focus_window its window first, or use find_text")
             lay = layout_from_monitors(monitors)
             return act_click(*lay.to_shot(w["at"][0] + out["click"][0], w["at"][1] + out["click"][1]))
         mark_input("click")
+        if not on_screen(w, monitors):
+            out["centre"] = None
         if out.get("gone"):
             return f'Did "{out["did"]}" on {ref}, which is gone now (the window changed)'
         return f'Did "{out["did"]}" on ' + element_line(ref, out, w, layout_from_monitors(monitors), named=False)
