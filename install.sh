@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # hypr-computer one-command installer.
 #
-#   curl -fsSL https://malik-na.github.io/hypr-computer/install.sh | bash
+#   curl -fsSL malik-na.github.io/hc | bash
 #
 # Options (pass after `bash -s --`):
 #   --yes            don't ask for confirmation (for agents / unattended use)
