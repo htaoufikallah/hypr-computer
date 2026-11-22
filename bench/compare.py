@@ -11,7 +11,7 @@ from collections import defaultdict
 from pathlib import Path
 from statistics import mean
 
-METRICS = ("turns", "screenshots", "input_tokens", "wall_s", "cost_usd")
+METRICS = ("turns", "screenshots", "input_tokens", "wall_s", "tool_s", "server_ms", "cost_usd")
 
 
 def load(path: str) -> tuple[str, dict[str, list[dict]]]:
@@ -22,12 +22,18 @@ def load(path: str) -> tuple[str, dict[str, list[dict]]]:
     return (rows[0]["label"] if rows else Path(path).stem), by_task
 
 
-def fmt(v: float, k: str) -> str:
+def fmt(v: float | None, k: str) -> str:
+    if v is None:
+        return "-"
     if k == "input_tokens":
         return f"{v / 1000:.1f}k"
     if k == "cost_usd":
         return f"${v:.3f}"
     return f"{v:.1f}"
+
+
+def mean_of(rows: list[dict], k: str) -> float | None:
+    return None if all(r.get(k) is None for r in rows) else mean(r.get(k) or 0 for r in rows)
 
 
 def main(paths: list[str]) -> None:
@@ -41,14 +47,15 @@ def main(paths: list[str]) -> None:
             rs = bt.get(t, [])
             cells.append(f"{sum(r['success'] for r in rs)}/{len(rs)}" if rs else "-")
         print(f"| {t} | passed | " + " | ".join(cells) + " |")
-        for k in ("turns", "input_tokens", "wall_s"):
-            vals = [fmt(mean(r.get(k) or 0 for r in bt[t]), k) if bt.get(t) else "-" for _, bt in runs]
+        for k in ("turns", "input_tokens", "wall_s", "tool_s", "server_ms"):
+            vals = [fmt(mean_of(bt.get(t, []), k), k) for _, bt in runs]
             print(f"| | {k} (mean) | " + " | ".join(vals) + " |")
     print()
     for label, bt in runs:
         rows = [r for rs in bt.values() for r in rs]
         reps = max(r["rep"] for r in rows)
-        per_rep = {k: sum(r.get(k) or 0 for r in rows) / reps for k in METRICS}
+        per_rep = {k: None if all(r.get(k) is None for r in rows) else sum(r.get(k) or 0 for r in rows) / reps
+                   for k in METRICS}
         print(f"{label}: {sum(r['success'] for r in rows)}/{len(rows)} passed over {reps} rep(s); per full run: "
               + ", ".join(f"{k} {fmt(v, k)}" for k, v in per_rep.items()))
 

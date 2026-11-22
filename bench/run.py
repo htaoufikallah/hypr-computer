@@ -28,7 +28,8 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from tasks import GENERIC_SYSTEM_PROMPT, PREP, SESSION, SYSTEM_PROMPT, TEARDOWN, WAIT_WINDOWS, WORKSPACE, make_tasks  # noqa: E402
+from tasks import (BENCH, GENERIC_SYSTEM_PROMPT, PREP, SESSION, SYSTEM_PROMPT, TEARDOWN, WAIT_WINDOWS,  # noqa: E402
+                   WORKSPACE, make_tasks)
 
 HERE = Path(__file__).parent
 DEFAULT_SERVER = "~/.local/share/hypr-computer/server.py"
@@ -40,14 +41,17 @@ def remote(host: str, script: str, timeout: int = 120) -> subprocess.CompletedPr
 
 
 def sync_server(host: str, src: Path, label: str) -> str:
-    dest = f"/tmp/hcb/server-{label}"
+    dest = f"{BENCH}/server-{label}"
+    files = [str(src / f) for f in ("server.py", "server.py.lock", "wl_input.py") if (src / f).exists()]
     if host == "local":
         subprocess.run(["mkdir", "-p", dest], check=True)
-        subprocess.run(["cp", str(src / "server.py"), str(src / "wl_input.py"), dest], check=True)
+        subprocess.run(["cp", *files, dest], check=True)
     else:
         subprocess.run(["ssh", "-o", "BatchMode=yes", host, f"mkdir -p {dest}"], check=True)
-        subprocess.run(["scp", "-q", "-o", "BatchMode=yes", str(src / "server.py"), str(src / "wl_input.py"),
-                        f"{host}:{dest}/"], check=True)
+        subprocess.run(["scp", "-q", "-o", "BatchMode=yes", *files, f"{host}:{dest}/"], check=True)
+    warm = remote(host, f"uv run --quiet --script {dest}/server.py --version", timeout=600)
+    if warm.returncode != 0:
+        raise SystemExit(f"{dest}/server.py does not start:\n{warm.stderr}")
     return f"{dest}/server.py"
 
 
@@ -56,9 +60,11 @@ SESSION_ENV = ("export XDG_RUNTIME_DIR=/run/user/$(id -u); "
                "export HYPRLAND_INSTANCE_SIGNATURE=$(ls -t $XDG_RUNTIME_DIR/hypr | head -1); ")
 
 
-def mcp_config(host: str, server: str, name: str, command: str | None) -> str:
-    browser = "chromium --user-data-dir=/tmp/hcb/chrome --no-first-run --no-default-browser-check"
-    run = SESSION_ENV + f"export HYPR_COMPUTER_BROWSER={shlex.quote(browser)}; exec " + (command or f"uv run --quiet --script {server}")
+def mcp_config(host: str, server: str, name: str, command: str | None, record_dir: str) -> str:
+    browser = f"chromium --user-data-dir={BENCH}/chrome --no-first-run --no-default-browser-check"
+    run = (SESSION_ENV + f"export HYPR_COMPUTER_BROWSER={shlex.quote(browser)} HYPR_COMPUTER_FILE_URLS={BENCH}/www "
+           f"HYPR_COMPUTER_RECORD_DIR={shlex.quote(record_dir)}; exec "
+           + (command or f"uv run --quiet --script {server}"))
     if host == "local":
         entry = {"command": "bash", "args": ["-lc", run]}
     else:
@@ -81,15 +87,18 @@ def run_agent(prompt: str, cfg: str, name: str, system_prompt: str, max_turns: i
            "--max-turns", str(max_turns)]
     if model:
         cmd += ["--model", model]
-    t0 = time.monotonic()
+    t0 = last = time.monotonic()
     tools: dict[str, int] = {}
     images = 0
     tool_errors = 0
+    tool_s = 0.0
     info: dict = {"model": None, "result": None}
     with transcript.open("w") as log:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         try:
             for line in proc.stdout:
+                now, since = time.monotonic(), time.monotonic() - last
+                last = now
                 log.write(line)
                 try:
                     ev = json.loads(line)
@@ -103,8 +112,11 @@ def run_agent(prompt: str, cfg: str, name: str, system_prompt: str, max_turns: i
                             name = block["name"].split("__")[-1]
                             tools[name] = tools.get(name, 0) + 1
                 elif ev.get("type") == "user":
-                    for block in ev.get("message", {}).get("content", []):
-                        if isinstance(block, dict) and block.get("type") == "tool_result":
+                    blocks = [b for b in ev.get("message", {}).get("content", []) if isinstance(b, dict)]
+                    if any(b.get("type") == "tool_result" for b in blocks):
+                        tool_s += since
+                    for block in blocks:
+                        if block.get("type") == "tool_result":
                             tool_errors += bool(block.get("is_error"))
                             content = block.get("content")
                             if isinstance(content, list):
@@ -117,12 +129,15 @@ def run_agent(prompt: str, cfg: str, name: str, system_prompt: str, max_turns: i
             info["timeout"] = True
     res = info["result"] or {}
     usage = res.get("usage", {})
+    api_s = res.get("duration_api_ms", 0) / 1000
     return {
         "model": info["model"],
         "agent_status": res.get("subtype", "timeout" if info.get("timeout") else "no-result"),
         "turns": res.get("num_turns"),
         "wall_s": round(time.monotonic() - t0, 1),
-        "api_s": round(res.get("duration_api_ms", 0) / 1000, 1),
+        "api_s": round(api_s, 1),
+        "s_per_turn": round(api_s / res["num_turns"], 2) if res.get("num_turns") else None,
+        "tool_s": round(tool_s, 1),
         "cost_usd": res.get("total_cost_usd"),
         "input_tokens": sum(usage.get(k, 0) or 0 for k in
                             ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")),
@@ -132,6 +147,19 @@ def run_agent(prompt: str, cfg: str, name: str, system_prompt: str, max_turns: i
         "tool_errors": tool_errors,
         "tools": tools,
     }
+
+
+def server_time(host: str, record_dir: str) -> dict:
+    r = remote(host, f"cat {shlex.quote(record_dir)}/steps.jsonl 2>/dev/null || true; rm -rf {shlex.quote(record_dir)}")
+    return summarize_steps(r.stdout)
+
+
+def summarize_steps(steps_jsonl: str) -> dict:
+    timed = [s for s in map(json.loads, filter(str.strip, steps_jsonl.splitlines())) if "total_ms" in s]
+    if not timed:
+        return {"server_ms": None}
+    return {"server_ms": round(sum(s["total_ms"] for s in timed)),
+            **{k: round(sum(s[k] for s in timed)) for k in ("settle_ms", "capture_ms", "ipc_ms")}}
 
 
 def main() -> int:
@@ -153,7 +181,6 @@ def main() -> int:
     args = ap.parse_args()
 
     server = sync_server(args.host, args.sync, args.label) if args.sync else args.server
-    cfg = mcp_config(args.host, server, args.server_name, args.mcp_command)
     system_prompt = SYSTEM_PROMPT if args.server_name == "hypr-computer" else GENERIC_SYSTEM_PROMPT
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     out_dir = HERE / "results"
@@ -180,8 +207,14 @@ def main() -> int:
                                   f"[print(c[\"class\"],\"|\",c[\"title\"]) for c in json.load(sys.stdin) if c[\"workspace\"][\"id\"]=={WORKSPACE}]'")
                     stats = {"windows": shot.stdout.strip().splitlines()}
                 else:
-                    stats = run_agent(task.prompt, cfg, args.server_name, system_prompt, task.max_turns, args.model,
-                                      raw_dir / f"{task.id}-{rep + 1}.jsonl", args.timeout)
+                    record_dir = f"{BENCH}/rec-{stamp}-{args.label}-{task.id}-{rep + 1}"
+                    cfg = mcp_config(args.host, server, args.server_name, args.mcp_command, record_dir)
+                    try:
+                        stats = run_agent(task.prompt, cfg, args.server_name, system_prompt, task.max_turns,
+                                          args.model, raw_dir / f"{task.id}-{rep + 1}.jsonl", args.timeout)
+                    finally:
+                        os.unlink(cfg)
+                    stats |= server_time(args.host, record_dir)
                 ok = remote(args.host, task.check).returncode == 0
             finally:
                 remote(args.host, TEARDOWN)
@@ -190,7 +223,6 @@ def main() -> int:
             with summary.open("a") as f:
                 f.write(json.dumps(row) + "\n")
             print(f"[{task.id} #{rep + 1}] {'PASS' if ok else 'FAIL'} {json.dumps(stats)}", flush=True)
-    os.unlink(cfg)
 
     if args.setup_only:
         broken = sorted({r["task"] for r in rows if r["success"]})
@@ -208,16 +240,18 @@ def main() -> int:
 
 def print_table(rows: list[dict]) -> None:
     cols = ["task", "success", "turns", "tool_calls", "screenshots", "input_tokens",
-            "output_tokens", "wall_s", "cost_usd", "agent_status"]
+            "output_tokens", "wall_s", "s_per_turn", "tool_s", "server_ms", "cost_usd", "agent_status"]
     print("\n| " + " | ".join(cols) + " |\n|" + "---|" * len(cols))
     for r in rows:
         print("| " + " | ".join(str(r.get(c, "")) for c in cols) + " |")
     n = len(rows)
     if n:
         tot = lambda k: sum((r.get(k) or 0) for r in rows)  # noqa: E731
+        server = "n/a" if any(r.get("server_ms") is None for r in rows) else f"{tot('server_ms') / 1000:.1f}s"
         print(f"\n{sum(r['success'] for r in rows)}/{n} passed · turns {tot('turns')} · "
               f"screenshots {tot('screenshots')} · input tokens {tot('input_tokens'):,} · "
-              f"time {tot('wall_s'):.0f}s · cost ${tot('cost_usd'):.2f}"
+              f"time {tot('wall_s'):.0f}s · {tot('api_s') / max(1, tot('turns')):.2f}s/turn in the model · "
+              f"tools {tot('tool_s'):.1f}s (server {server}) · cost ${tot('cost_usd'):.2f}"
               f" · model {rows[0].get('model')}")
 
 
