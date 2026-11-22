@@ -40,7 +40,6 @@ def remote(host: str, script: str, timeout: int = 120) -> subprocess.CompletedPr
 
 
 def sync_server(host: str, src: Path, label: str) -> str:
-    """Copy a working tree to the target so a branch can be benchmarked."""
     dest = f"/tmp/hcb/server-{label}"
     if host == "local":
         subprocess.run(["mkdir", "-p", dest], check=True)
@@ -52,14 +51,12 @@ def sync_server(host: str, src: Path, label: str) -> str:
     return f"{dest}/server.py"
 
 
-# Other MCP servers may not find the Hyprland session on their own over SSH.
 SESSION_ENV = ("export XDG_RUNTIME_DIR=/run/user/$(id -u); "
                "export WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-$(ls $XDG_RUNTIME_DIR | grep -m1 '^wayland-[0-9]*$')}; "
                "export HYPRLAND_INSTANCE_SIGNATURE=$(ls -t $XDG_RUNTIME_DIR/hypr | head -1); ")
 
 
 def mcp_config(host: str, server: str, name: str, command: str | None) -> str:
-    # open_url uses the throwaway bench profile, never the user's browser.
     browser = "chromium --user-data-dir=/tmp/hcb/chrome --no-first-run --no-default-browser-check"
     run = SESSION_ENV + f"export HYPR_COMPUTER_BROWSER={shlex.quote(browser)}; exec " + (command or f"uv run --quiet --script {server}")
     if host == "local":
@@ -92,7 +89,7 @@ def run_agent(prompt: str, cfg: str, name: str, system_prompt: str, max_turns: i
     with transcript.open("w") as log:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         try:
-            for line in proc.stdout:  # type: ignore[union-attr]
+            for line in proc.stdout:
                 log.write(line)
                 try:
                     ev = json.loads(line)
@@ -131,7 +128,7 @@ def run_agent(prompt: str, cfg: str, name: str, system_prompt: str, max_turns: i
                             ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")),
         "output_tokens": usage.get("output_tokens"),
         "tool_calls": sum(tools.values()),
-        "screenshots": images,  # image blocks returned by any tool
+        "screenshots": images,
         "tool_errors": tool_errors,
         "tools": tools,
     }

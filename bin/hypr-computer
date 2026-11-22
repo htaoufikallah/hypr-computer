@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# hypr-computer: manage the local install. Linked into ~/.local/bin by the installer.
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
@@ -16,7 +15,7 @@ case "${1:-help}" in
 usage: hypr-computer <command>
 
   update    install the latest release (rolls back if it fails its self-check)
-  check     read-only self-check
+  check     self-check (clicks nothing, types no text)
   version   print the installed version
   stop      block every action of every running agent at once
   resume    allow actions again

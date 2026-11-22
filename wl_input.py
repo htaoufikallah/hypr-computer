@@ -1,15 +1,3 @@
-"""Root-free mouse and keyboard input for Wayland, in pure Python.
-
-Speaks the Wayland wire protocol directly over the compositor socket and uses
-two standard protocols that Hyprland (and other wlroots-style compositors)
-offer to ordinary clients:
-
-  * zwlr_virtual_pointer_manager_v1  - buttons and scrolling
-  * zwp_virtual_keyboard_manager_v1  - keys, with our own US keymap
-
-No uinput, no root, no daemon, no third-party packages. The keyboard brings its
-own keymap, so typing is correct whatever layout the user has selected.
-"""
 from __future__ import annotations
 
 import array
@@ -20,9 +8,8 @@ import subprocess
 import time
 
 BTN = {"left": 0x110, "right": 0x111, "middle": 0x112}
-MOD_KEYS = {29: 2, 97: 2, 42: 0, 54: 0, 56: 3, 100: 7, 125: 6, 126: 6}  # evdev -> xkb mod index
+XKB_MOD_INDEX = {29: 2, 97: 2, 42: 0, 54: 0, 56: 3, 100: 7, 125: 6, 126: 6}
 
-# US layout: char -> (evdev keycode, needs shift)
 _US = {}
 for row, codes in (("1234567890-=", list(range(2, 14))), ("qwertyuiop[]", list(range(16, 28))),
                    ("asdfghjkl;'`", list(range(30, 42))), ("\\zxcvbnm,./", [43] + list(range(44, 54)))):
@@ -36,7 +23,6 @@ _US.update({" ": (57, False), "\n": (28, False), "\t": (15, False)})
 
 
 def us_keymap() -> bytes:
-    """A complete US XKB keymap, compiled by libxkbcommon's xkbcli."""
     out = subprocess.run(["xkbcli", "compile-keymap", "--layout", "us"],
                          capture_output=True, check=True)
     return out.stdout + b"\0"
@@ -63,9 +49,8 @@ class _Conn:
             self.sock.sendall(msg)
 
     def roundtrip(self, registry: int | None = None, timeout: float = 2.0) -> None:
-        """wl_display.sync and read events until it fires; raises on protocol errors."""
         cb = self.new_id()
-        self.send(1, 0, struct.pack("<I", cb))
+        self.send(1, 0, struct.pack("<I", cb))  # wl_display.sync
         self.sock.settimeout(timeout)
         while True:
             while len(self.buf) >= 8:
@@ -112,8 +97,6 @@ def _ms() -> int:
 
 
 class VirtualInput:
-    """One Wayland connection with a virtual pointer and a virtual keyboard."""
-
     def __init__(self, runtime_dir: str, display: str):
         self.c = _Conn(os.path.join(runtime_dir, display))
         reg = self.c.new_id()
@@ -138,7 +121,6 @@ class VirtualInput:
         self._key(42, False)
         self.c.roundtrip()
 
-    # ---- pointer
     def click(self, button: str = "left", count: int = 1, gap: float = 0.08) -> None:
         code = BTN[button]
         for i in range(count):
@@ -156,7 +138,6 @@ class VirtualInput:
         self.c.roundtrip()
 
     def scroll(self, dx_steps: int, dy_steps: int) -> None:
-        """Wheel notches; positive dy scrolls down, positive dx scrolls right."""
         self.c.send(self.ptr, 5, struct.pack("<I", 0))  # axis_source: wheel
         for axis, steps in ((0, dy_steps), (1, dx_steps)):
             if steps:
@@ -164,11 +145,10 @@ class VirtualInput:
         self.c.send(self.ptr, 4)
         self.c.roundtrip()
 
-    # ---- keyboard
     def _key(self, code: int, pressed: bool) -> None:
         self.c.send(self.kbd, 1, struct.pack("<III", _ms(), code, 1 if pressed else 0))
-        if code in MOD_KEYS:
-            bit = 1 << MOD_KEYS[code]
+        if code in XKB_MOD_INDEX:
+            bit = 1 << XKB_MOD_INDEX[code]
             self.mods = (self.mods | bit) if pressed else (self.mods & ~bit)
             self.c.send(self.kbd, 2, struct.pack("<IIII", self.mods, 0, 0, 0))
 

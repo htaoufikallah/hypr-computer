@@ -1,21 +1,12 @@
-"""Benchmark tasks for hypr-computer.
-
-Each task has a shell `setup` and `check` that run on the target machine (inside
-the Hyprland session), plus a `prompt` for the agent. Setup opens its own
-windows on a dedicated workspace with a throwaway Chromium profile and a foot
-terminal with its own app-id, so the user's windows are never touched.
-Random values are generated per run so the agent can't succeed by guessing.
-"""
 from __future__ import annotations
 
 import random
 import string
 from dataclasses import dataclass, field
 
-BENCH = "/tmp/hcb"  # scratch dir on the target
+BENCH = "/tmp/hcb"
 WORKSPACE = 9
 
-# Prepended to every remote script: find the Hyprland session from SSH.
 SESSION = f"""
 set -e
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
@@ -24,7 +15,6 @@ export HYPRLAND_INSTANCE_SIGNATURE=$(ls -t $XDG_RUNTIME_DIR/hypr | head -1)
 B={BENCH}
 """
 
-# Opens the bench workspace and records PIDs for teardown.
 PREP = f"""
 mkdir -p $B/out $B/www
 rm -f $B/out/* $B/pids
@@ -59,7 +49,6 @@ prev=$(cat $B/prev_ws 2>/dev/null || echo 1)
 hyprctl dispatch "hl.dsp.focus({workspace = $prev})" >/dev/null
 """
 
-# A window title is the easiest thing to check from outside the browser.
 TITLE_OF_BENCH_CHROMIUM = (
     "hyprctl -j clients | python3 -c 'import json,sys;"
     f"print(\"\\n\".join(c[\"title\"] for c in json.load(sys.stdin) if c[\"workspace\"][\"id\"]=={WORKSPACE}))'"
@@ -81,7 +70,7 @@ class Task:
     id: str
     prompt: str
     setup: str
-    check: str  # exit 0 = success
+    check: str
     windows: int = 1
     max_turns: int = 30
     meta: dict = field(default_factory=dict)
@@ -90,7 +79,6 @@ class Task:
 def make_tasks(rng: random.Random) -> list[Task]:
     tasks: list[Task] = []
 
-    # 1. Navigate: address bar, typing, Enter.
     tasks.append(Task(
         id="navigate",
         prompt="A Chromium window is open on the screen. Use it to open https://example.com.",
@@ -98,7 +86,6 @@ def make_tasks(rng: random.Random) -> list[Task]:
         check=f"{TITLE_OF_BENCH_CHROMIUM} | grep -q 'Example Domain'",
     ))
 
-    # 2. Form: clicking fields, typing, a dropdown, a checkbox, submit.
     name = "Ada " + rng.choice(["Lovelace", "Byron", "King", "Hopper"])
     email = "".join(rng.choices(string.ascii_lowercase, k=6)) + "@example.org"
     plan = rng.choice(["Basic", "Pro", "Team"])
@@ -118,7 +105,6 @@ document.title='RESULT|'+v('name').value+'|'+v('email').value+'|'+v('plan').valu
         check=f"{TITLE_OF_BENCH_CHROMIUM} | grep -qF 'RESULT|{name}|{email}|{plan}|1'",
     ))
 
-    # 3. Scroll and read: find one value in a long page, enter it at the bottom.
     target = rng.randint(300, 470)
     codes = {i: "".join(rng.choices(string.ascii_uppercase + string.digits, k=6)) for i in range(1, 501)}
     rows = "".join(f"<tr><td>Item {i}</td><td>{codes[i]}</td></tr>" for i in range(1, 501))
@@ -135,7 +121,6 @@ document.title='RESULT|'+v('name').value+'|'+v('email').value+'|'+v('plan').valu
         max_turns=40,
     ))
 
-    # 4. Terminal: focus a terminal and run a command by typing.
     word = rng.choice(["amber", "cobalt", "saffron", "teal"]) + str(rng.randint(10, 99))
     tasks.append(Task(
         id="terminal",
@@ -145,7 +130,6 @@ document.title='RESULT|'+v('name').value+'|'+v('email').value+'|'+v('plan').valu
         check=f"[ \"$(cat $B/out/hello.txt 2>/dev/null)\" = 'hello {word}' ]",
     ))
 
-    # 5. Cross-app: read from the browser, act in the terminal.
     secret = str(rng.randint(100000, 999999))
     card = page(f"<h1>Your verification code</h1><p style='font-size:48px;letter-spacing:6px'>{secret}</p>")
     tasks.append(Task(
@@ -156,9 +140,6 @@ document.title='RESULT|'+v('name').value+'|'+v('email').value+'|'+v('plan').valu
         check=f"[ \"$(tr -d '[:space:]' < $B/out/code.txt 2>/dev/null)\" = '{secret}' ]",
         windows=2,
     ))
-    # 6. Private window + cookie banner (from user feedback: slow with Cursor).
-    # The normal profile gets a localStorage flag first; a private window can't see it,
-    # so the page itself reports which kind of window it was opened in.
     pick = rng.choice(["Accept all", "Reject all"])
     cookie = page(
         "<h1>Daily News</h1>" + "<p>Lorem ipsum dolor sit amet, consectetur adipiscing elit.</p>" * 12 +
@@ -186,7 +167,6 @@ SYSTEM_PROMPT = (
     "Only interact with the windows on the current workspace. When the task is done, reply DONE."
 )
 
-# For other MCP servers: same instructions, without hypr-computer's coordinate rule.
 GENERIC_SYSTEM_PROMPT = (
     "You are operating a Linux desktop (Hyprland) through the tools of the connected MCP server only. "
     "Only interact with the windows on the current workspace. When the task is done, reply DONE."
