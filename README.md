@@ -22,8 +22,8 @@ It shows what it will do and asks before starting. Then it:
    missing), let your user use `/dev/uinput`, load `uinput` at boot and enable
    the `ydotool` user service.
 3. Runs a read-only self-check.
-4. Registers the server with every supported agent it finds: Claude Code, Codex,
-   opencode, Gemini CLI and Cursor.
+4. Registers the server with each supported agent you've used (it checks for the
+   agent's config folder): Claude Code, Codex, opencode, Gemini CLI and Cursor.
 
 Then restart your agent. To update later, run the same command again.
 
@@ -60,7 +60,7 @@ You are probably an agent asked to set up computer use on this machine.
    packages and allow access to `/dev/uinput`, and wait for their OK.
 3. **Install.** Replace `<client>` with the agent you are running in: `claude`,
    `codex`, `opencode`, `gemini` or `cursor`. Leave out `--clients` to register
-   every agent found.
+   every agent whose config folder exists.
    ```bash
    curl -fsSL https://raw.githubusercontent.com/malik-na/hypr-computer/main/install.sh | bash -s -- --yes --clients=<client>
    ```

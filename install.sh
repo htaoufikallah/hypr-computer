@@ -8,7 +8,7 @@
 #   --dry-run        print what would happen, change nothing
 #   --no-system      skip package install / uinput setup (already done)
 #   --clients=LIST   comma list of clients to register: claude,codex,opencode,gemini,cursor
-#                    default: every one of those found on this machine; "none" to skip
+#                    default: each of those whose config folder exists; "none" to skip
 #   --dir=PATH       install location (default ~/.local/share/hypr-computer)
 set -euo pipefail
 
@@ -55,13 +55,16 @@ if [ "$SYSTEM" = 1 ] && [ "$PACMAN" = 0 ]; then
 fi
 
 # ------------------------------------------------------------------- plan
+# Detect agents the user has actually used, by their config folders. Checking
+# `command -v` is not enough: Omarchy (mise "lazy" tools) puts shims on PATH for
+# agents that aren't installed yet, and running one downloads the whole agent.
 detect() {
   local found=()
-  command -v claude   >/dev/null && found+=(claude)
-  command -v codex    >/dev/null && found+=(codex)
-  command -v opencode >/dev/null && found+=(opencode)
-  { command -v gemini >/dev/null || [ -d "$HOME/.gemini" ]; } && found+=(gemini)
-  { command -v cursor-agent >/dev/null || command -v cursor >/dev/null || [ -d "$HOME/.cursor" ]; } && found+=(cursor)
+  { [ -f "$HOME/.claude.json" ] || [ -d "$HOME/.claude" ]; } && found+=(claude)
+  [ -d "${CODEX_HOME:-$HOME/.codex}" ] && found+=(codex)
+  [ -d "${XDG_CONFIG_HOME:-$HOME/.config}/opencode" ] && found+=(opencode)
+  [ -d "$HOME/.gemini" ] && found+=(gemini)
+  [ -d "$HOME/.cursor" ] && found+=(cursor)
   (IFS=,; echo "${found[*]:-}")
 }
 [ "$CLIENTS" = "auto" ] && CLIENTS=$(detect)
@@ -143,16 +146,29 @@ print(f"    added to {path}")
 PY
 }
 
+# True only if the agent CLI is really installed. A mise "lazy" shim would
+# download the whole agent the moment it runs; `mise which` checks without that.
+installed() {
+  local p; p=$(command -v "$1") || return 1
+  case "$p" in
+    */mise/shims/*) mise which "$1" >/dev/null 2>&1 ;;
+    *) return 0 ;;
+  esac
+}
+
 register() {
   case "$1" in
     claude)
+      installed claude || { warn "claude is not installed; skipped (install it, then re-run this command)"; return 0; }
       if claude mcp list 2>/dev/null | grep -q "hypr-computer"; then info "already registered"
       else run claude mcp add --transport stdio --scope user hypr-computer -- "${CMD[@]}"; fi ;;
     codex)
-      if grep -qs '^\[mcp_servers\.hypr-computer\]' "$HOME/.codex/config.toml"; then info "already registered"
+      installed codex || { warn "codex is not installed; skipped (install it, then re-run this command)"; return 0; }
+      if grep -qs '^\[mcp_servers\.hypr-computer\]' "${CODEX_HOME:-$HOME/.codex}/config.toml"; then info "already registered"
       else run codex mcp add hypr-computer -- "${CMD[@]}"; fi ;;
     opencode)
-      if grep -qs '"hypr-computer"' "$HOME/.config/opencode/opencode.json" "$HOME/.config/opencode/opencode.jsonc"
+      installed opencode || { warn "opencode is not installed; skipped (install it, then re-run this command)"; return 0; }
+      if grep -qs '"hypr-computer"' "${XDG_CONFIG_HOME:-$HOME/.config}"/opencode/opencode.json{,c}
       then info "already registered"
       else run opencode mcp add hypr-computer --global -- "${CMD[@]}"; fi ;;
     gemini) merge_json "$HOME/.gemini/settings.json" ;;

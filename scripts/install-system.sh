@@ -44,4 +44,4 @@ else
   echo "  ydotoold: socket missing (journalctl --user -u ydotool)"; ok=0
 fi
 command -v uv >/dev/null && echo "  uv: $(command -v uv)" || { echo "  uv: missing (needed to run the server)"; ok=0; }
-[ "$ok" = 1 ] && say "Done. Restart Claude Code to load the hypr-computer tools."
+[ "$ok" = 1 ] && say "System setup done."
