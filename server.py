@@ -327,17 +327,17 @@ class HyprEvents:
         while not self._closed:
             try:
                 s = self._connect()
-            except (OSError, RuntimeError, ValueError):
+            except Exception:  # noqa: BLE001
                 time.sleep(0.5)
                 continue
             alive = True
             while alive and not self._closed:
                 try:
                     select.select([s], [], [], 1.0)
-                except (OSError, ValueError):
+                    with self.cond:
+                        alive = self._sock is s and self._pump()
+                except Exception:  # noqa: BLE001
                     break
-                with self.cond:
-                    alive = self._sock is s and self._pump()
             with self.cond:
                 if self._sock is s:
                     self._drop()
@@ -359,7 +359,7 @@ class HyprEvents:
         with self.cond:
             self._sock, self._buf = s, b""
             self.windows = {c["address"]: {k: c.get(k) or "" for k in ("address", "class", "title")}
-                            for c in clients}
+                            for c in clients if c.get("address")}
             self.active = active.get("address", "")
             self.connected = True
             self.cond.notify_all()
@@ -462,18 +462,19 @@ def mark_input(kind: str) -> None:
 
 
 def settle() -> None:
-    """Wait out the floor for the last input, and while title or focus changes keep arriving,
-    up to SETTLE_S after it. A window opening or closing or a workspace switch since the last
-    action began waits SETTLE_S after that event, for the compositor's animation. Without the
-    event socket, wait the whole SETTLE_S."""
+    """Wait out the floor for the last input, and SETTLE_QUIET_S past each title or focus
+    change since the last action began; SETTLE_S past a window opening or closing or a
+    workspace switch, for the compositor's animation. Never more than SETTLE_S in all.
+    Without the event socket, wait until SETTLE_S after the last input."""
     t, floor = _last_input
+    start = time.monotonic()
     with spent("settle_ms"):
         while True:
             n = EVENTS.sync()
             end = t + SETTLE_S
             if EVENTS.connected:
-                end = min(end, max([t + floor, *(e.t + (SETTLE_S if e.kind in ANIMATED else SETTLE_QUIET_S)
-                                                  for e in EVENTS.since(min(t, _last_action)))]))
+                end = min(start + SETTLE_S, max([t + floor, *(e.t + (SETTLE_S if e.kind in ANIMATED else SETTLE_QUIET_S)
+                                                             for e in EVENTS.since(min(t, _last_action)))]))
             left = end - time.monotonic()
             if left <= 0:
                 return
@@ -523,8 +524,8 @@ def guard(point: tuple[int, int] | None = None) -> None:
 
 
 PPM_HEADER = re.compile(rb"P6\s+(\d+)\s+(\d+)\s+255\s")
-UNCHANGED = ("Screen unchanged: identical to the last screenshot, which is still current, so no "
-             "new image. The action had no visible effect (yet).")
+UNCHANGED = ("Screen unchanged: identical to the last screenshot, so no new image (call screenshot "
+             "to see it again). The action had no visible effect (yet).")
 _shown: bytes | None = None  # digest of the last screenshot the agent was sent
 
 
@@ -652,33 +653,39 @@ WAIT_EVENTS = {"window": "a window opens", "title": "the focused window's title 
                "focus": "focus moves", "stable": "the screen stops changing"}
 
 
-def focused_match(event: str, pattern: re.Pattern) -> str | None:
+_waited = 0.0  # when the event the last wait_for returned happened; the next waits for a newer one
+
+
+def focused_match(event: str, pattern: re.Pattern) -> Event | None:
     w = hypr_json("activewindow") or {}
     fields = (w.get("title"),) if event == "title" else (w.get("class"), w.get("title"))
     if any(pattern.search(f or "") for f in fields):
-        return Event(0, event, {k: w.get(k) or "" for k in ("address", "class", "title")}).describe(deny_pattern())
+        return Event(time.monotonic(), event, {k: w.get(k) or "" for k in ("address", "class", "title")})
     return None
 
 
-def happened(event: str, pattern: re.Pattern | None, since: float) -> str | None:
+def happened(event: str, pattern: re.Pattern | None, since: float) -> Event | None:
     kind = {"window": "open"}.get(event, event)
     for e in EVENTS.since(since):
-        if e.kind == kind and (pattern is None or any(pattern.search(e.window.get(k) or "") for k in ("class", "title"))):
-            return e.describe(deny_pattern())
+        w = EVENTS.windows.get(e.window.get("address"), e.window) if kind == "open" else e.window
+        if e.t > since and e.kind == kind and (pattern is None or any(pattern.search(w.get(k) or "")
+                                                                      for k in ("class", "title"))):
+            return Event(e.t, e.kind, w)
     return None
 
 
-def screen_stable(timeout: float) -> str | None:
+def screen_stable(timeout: float) -> Event | None:
     end = time.monotonic() + timeout
     settle()
     last = None
     while True:
         digest = frame()[2]
         if digest == last:
-            return "the screen is stable"
+            return Event(time.monotonic(), "stable")
         last = digest
         if time.monotonic() >= end:
             return None
+        time.sleep(0.05)
 
 
 def act_wait_for(event: str, match: str = "", timeout_ms: int = 5000) -> str:
@@ -688,8 +695,9 @@ def act_wait_for(event: str, match: str = "", timeout_ms: int = 5000) -> str:
         pattern = re.compile(match, re.I) if match else None
     except re.error as e:
         raise ValueError(f"match is not a valid regex: {e}") from None
+    global _waited
     timeout = max(0, min(30000, int(timeout_ms))) / 1000
-    since = _last_action or time.monotonic()
+    since = max(_last_action, _waited) or time.monotonic()
     t0 = time.monotonic()
     if event == "stable":
         hit = screen_stable(timeout)
@@ -701,7 +709,8 @@ def act_wait_for(event: str, match: str = "", timeout_ms: int = 5000) -> str:
     if not hit:
         raise WaitTimeout(f"timed out after {ms} ms waiting until {WAIT_EVENTS[event]}"
                           + (f" to match {match!r}" if match else ""))
-    return f"{hit} after {ms} ms"
+    _waited = hit.t
+    return f"{'the screen is stable' if event == 'stable' else hit.describe(deny_pattern())} after {ms} ms"
 
 
 ACTIONS = {"click": act_click, "move": act_move, "drag": act_drag, "scroll": act_scroll,

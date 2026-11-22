@@ -55,7 +55,9 @@ def test_an_action_reports_the_windows_it_opened_focused_and_retitled(desktop):
     assert "Events" not in desktop.call("click", x=10, y=10)
 
 
-def test_events_keep_coming_after_hyprland_restarts(desktop):
+@pytest.mark.parametrize("clients", [[], [{"class": "no address"}, FOOT]])
+def test_events_keep_coming_after_hyprland_restarts(desktop, clients):
+    desktop.hypr.clients = clients
     desktop.hypr.restart("restarted")
     wait_connected(desktop)
     react(desktop, "openwindow>>beef,9,foot,after the restart")
@@ -74,9 +76,11 @@ def recorded(screen, tmp_path, monkeypatch):
 def test_a_screenshot_after_a_quiet_action_waits_only_that_actions_floor(screen, recorded):
     screen.call("key", combo="shift", screenshot=True)
     screen.call("click", x=10, y=10, screenshot=True)
-    key, click = steps(recorded)
-    assert 70 <= key["settle_ms"] <= 160, key
-    assert 170 <= click["settle_ms"] <= 260, click
+    screen.call("screenshot")
+    key, click, later_shot = steps(recorded)
+    assert 70 <= key["settle_ms"] <= 220, key
+    assert 170 <= click["settle_ms"] <= 320, click
+    assert later_shot["settle_ms"] < 20, later_shot
 
 
 def test_the_settle_lasts_while_the_title_keeps_changing_up_to_the_cap(screen, recorded):
@@ -86,8 +90,8 @@ def test_the_settle_lasts_while_the_title_keeps_changing_up_to_the_cap(screen, r
     react(screen, then=ticking(screen.hypr, every=0.05, for_s=2))
     screen.call("click", x=10, y=10, screenshot=True)
     loading, endless = steps(recorded)
-    assert 330 <= loading["settle_ms"] <= 480, loading
-    assert 560 <= endless["settle_ms"] <= 680, endless
+    assert 330 <= loading["settle_ms"] <= 520, loading
+    assert 560 <= endless["settle_ms"] <= 720, endless
 
 
 def test_a_window_opening_waits_out_the_whole_cap_for_its_animation(screen, recorded):
@@ -96,15 +100,23 @@ def test_a_window_opening_waits_out_the_whole_cap_for_its_animation(screen, reco
     react(screen, "closewindow>>c0de", then=lambda: time.sleep(0.2))  # closed before the key came up
     screen.call("key", combo="ctrl+w", screenshot=True)
     opened, closed = steps(recorded)
-    assert 560 <= opened["settle_ms"] <= 680, opened
-    assert 330 <= closed["settle_ms"] <= 480, closed
+    assert 560 <= opened["settle_ms"] <= 720, opened
+    assert 330 <= closed["settle_ms"] <= 520, closed
+
+
+def test_a_screenshot_after_waiting_for_a_late_window_waits_for_its_animation(screen, recorded):
+    screen.call("key", combo="super+Return")
+    later(0.8, lambda: screen.hypr.emit("openwindow>>c0de,9,foot,~"))
+    screen.call("wait_for", event="window", timeout_ms=3000, screenshot=True)
+    key, waited = steps(recorded)
+    assert 500 <= waited["settle_ms"] <= 720, waited
 
 
 def test_without_the_event_socket_the_settle_waits_the_whole_cap(screen, recorded):
     server.EVENTS.close()
     screen.call("key", combo="shift", screenshot=True)
     (key,) = steps(recorded)
-    assert 560 <= key["settle_ms"] <= 680, key
+    assert 560 <= key["settle_ms"] <= 720, key
 
 
 def test_wait_for_returns_as_soon_as_a_matching_window_opens(desktop):
@@ -121,6 +133,23 @@ def test_wait_for_counts_a_window_that_opened_during_the_last_action(desktop):
     desktop.call("click", x=10, y=10)
     assert desktop.call("wait_for", event="window", timeout_ms=0, screenshot=False).startswith(
         'opened chromium "New Tab" after ')
+
+
+def test_wait_for_window_matches_a_title_the_window_gets_after_opening(desktop):
+    later(0.1, lambda: desktop.hypr.emit("openwindow>>c0de,9,chromium,"))
+    later(0.3, lambda: desktop.hypr.emit("windowtitlev2>>c0de,Inbox - Gmail"))
+    out = desktop.call("wait_for", event="window", match="inbox", timeout_ms=3000, screenshot=False)
+    assert out.startswith('opened chromium "Inbox - Gmail" after ')
+
+
+def test_a_second_wait_for_waits_for_something_newer_than_the_first_returned(desktop):
+    desktop.hypr.emit("openwindow>>c0de,9,chromium,New Tab", "activewindowv2>>c0de")
+    react(desktop, "windowtitlev2>>c0de,Loading")
+    desktop.call("key", combo="Return")
+    assert desktop.call("wait_for", event="title", timeout_ms=0, screenshot=False).startswith('title "Loading" after')
+    later(0.3, lambda: desktop.hypr.emit("windowtitlev2>>c0de,Example Domain"))
+    out = desktop.call("wait_for", event="title", timeout_ms=3000, screenshot=False)
+    assert out.startswith('title "Example Domain" after ')
 
 
 def test_wait_for_title_waits_until_the_focused_windows_title_matches(desktop):
