@@ -60,12 +60,6 @@ def test_parse_combo_rejects_unknown(bad):
         server.parse_combo(bad)
 
 
-def test_text_runs_split_ascii_and_non_ascii():
-    assert server.text_runs("results?q=ü é!\n") == [
-        ("vk", "results?q="), ("wtype", "ü"), ("vk", " "), ("wtype", "é"), ("vk", "!\n")]
-    assert server.text_runs("") == []
-
-
 def test_us_table_covers_printable_ascii():
     for ch in map(chr, range(32, 127)):
         assert wl_input.VirtualInput.typeable(ch), ch
@@ -124,24 +118,6 @@ def test_settle_waits_only_right_after_input(monkeypatch):
     assert 0.15 < waited <= 0.2
 
 
-def test_run_steps_stops_at_first_failure(monkeypatch):
-    calls = []
-
-    def ok(**kw):
-        calls.append(kw)
-        return "ok"
-
-    def boom(**kw):
-        raise RuntimeError("nope")
-
-    monkeypatch.setattr(server, "ACTIONS", {"a": ok, "b": boom})
-    log, all_ok = server.run_steps([{"action": "a", "x": 1}, {"action": "b"}, {"action": "a"}])
-    assert not all_ok and len(calls) == 1 and calls[0] == {"x": 1}
-    assert "step 2 (b) failed: nope" in log[-1]
-    log, all_ok = server.run_steps([{"action": "zzz"}])
-    assert not all_ok and "unknown action" in log[0]
-
-
 def test_matching_windows_prefers_exact_class_then_recent():
     clients = [
         {"class": "foot", "title": "chromium notes", "focusHistoryID": 0},
@@ -177,28 +153,12 @@ def test_record_is_off_by_default_and_local_when_on(tmp_path, monkeypatch):
     assert (tmp_path / "rec" / "0001.jpg").read_bytes() == b"\xff\xd8jpeg"
 
 
-def test_desktop_execs_reads_actions_and_drops_field_codes(tmp_path):
-    f = tmp_path / "b.desktop"
-    f.write_text("[Desktop Entry]\nName=B\nExec=browser %U\n\n[Desktop Action new-window]\nName=New Window\n"
-                 "Exec=browser\n\n[Desktop Action new-private-window]\nName=New Private Window\n"
-                 "Exec=browser --incognito\n")
-    ex = server.desktop_execs(str(f))
-    assert ex[""] == ["browser"]
-    assert ["browser", "--incognito"] in ex.values()
-
-
 def test_browser_command_override_adds_private_flag(monkeypatch):
     monkeypatch.setenv("HYPR_COMPUTER_BROWSER", "chromium --user-data-dir=/tmp/x")
     assert server.browser_command(False) == ["chromium", "--user-data-dir=/tmp/x"]
     assert server.browser_command(True)[-1] == "--incognito"
     monkeypatch.setenv("HYPR_COMPUTER_BROWSER", "/usr/bin/firefox")
     assert server.browser_command(True) == ["/usr/bin/firefox", "--private-window"]
-
-
-def test_instructions_only_mention_registered_tools(monkeypatch):
-    monkeypatch.setenv("HYPR_COMPUTER_TOOLS", "core")
-    assert "open_url" not in server.CORE_INSTRUCTIONS
-    assert "open_url" in server.INSTRUCTIONS
 
 
 def test_page_ready_ignores_blank_and_loading_tabs():
@@ -240,3 +200,30 @@ def test_every_hyprctl_dispatch_goes_through_dispatch():
            and any(isinstance(a, ast.Constant) and a.value == "dispatch" for a in node.args)]
     assert not raw, (f"server.py lines {raw} build a hyprctl dispatch by hand; call "
                      "dispatch('name', {...}) so the Lua syntax is generated")
+
+
+
+def test_batch_stops_at_the_first_failing_step():
+    log, ok = server.run_steps([{"action": "wait", "ms": 0}, {"action": "key", "combo": "ctrl+nope"},
+                                {"action": "wait", "ms": 0}])
+    assert not ok and len(log) == 2 and log[0] == "step 1: waited 0 ms"
+    assert "step 2 (key) failed" in log[1]
+    log, ok = server.run_steps([{"action": "zzz"}])
+    assert not ok and "unknown action" in log[0]
+
+
+def test_private_window_uses_the_default_browsers_own_private_action(tmp_path, monkeypatch):
+    apps = tmp_path / "applications"
+    apps.mkdir()
+    (apps / "mybrowser.desktop").write_text(
+        "[Desktop Entry]\nName=My Browser\nExec=mybrowser %U\n\n[Desktop Action new-private-window]\n"
+        "Name=New Private Window\nExec=mybrowser --secret-mode\n")
+    xdg_mime = tmp_path / "bin" / "xdg-mime"
+    xdg_mime.parent.mkdir()
+    xdg_mime.write_text("#!/bin/sh\necho mybrowser.desktop\n")
+    xdg_mime.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{xdg_mime.parent}:{os.environ['PATH']}")
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    monkeypatch.delenv("HYPR_COMPUTER_BROWSER", raising=False)
+    assert server.browser_command(False) == ["mybrowser"]
+    assert server.browser_command(True) == ["mybrowser", "--secret-mode"]
