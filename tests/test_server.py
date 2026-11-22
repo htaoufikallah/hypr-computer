@@ -223,3 +223,21 @@ def test_update_note_once_when_disk_version_changes(tmp_path, monkeypatch):
     note = server.update_note()
     assert "1.1.0 is installed" in note and "restart" in note
     assert server.update_note() == ""  # only once per session
+
+
+def test_lua_literals_survive_quotes_backslashes_and_newlines():
+    assert server.lua({"x": 12, "y": 3.5}) == "{x = 12, y = 3.5}"
+    assert server.lua('say "hi" \\ there\n') == r'"say \034hi\034 \092 there\010"'
+    assert server.lua("café") == '"café"'
+    with pytest.raises(TypeError):
+        server.lua({"not an identifier": 1})
+
+
+def test_every_hyprctl_dispatch_goes_through_dispatch():
+    import ast
+    tree = ast.parse(open(server.__file__).read())
+    raw = [node.lineno for fn in ast.walk(tree) if isinstance(fn, ast.FunctionDef) and fn.name != "dispatch"
+           for node in ast.walk(fn) if isinstance(node, ast.Call)
+           and any(isinstance(a, ast.Constant) and a.value == "dispatch" for a in node.args)]
+    assert not raw, (f"server.py lines {raw} build a hyprctl dispatch by hand; call "
+                     "dispatch('name', {...}) so the Lua syntax is generated")
