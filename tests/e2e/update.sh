@@ -22,9 +22,9 @@ mkdir -p "$HOME/.local/bin"
 release() {  # release VERSION [broken]
   sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"$1\"/" .claude-plugin/plugin.json
   [ "${2:-}" = broken ] && sed -i 's/REQUIRED_TOOLS = ("hyprctl"/REQUIRED_TOOLS = ("no-such-tool", "hyprctl"/' server.py
-  git add -A && git commit -qm "v$1" && git tag "v$1" && git push -q "$T/repo.git" HEAD:main "v$1"
+  git add -A && git commit -qm "v$1" && git tag "v$1" && git push -q "$T/repo.git" HEAD:refs/heads/main "v$1"
 }
-git clone -q "$SRC" "$T/src" && cd "$T/src" && git config user.email e2e@test && git config user.name e2e
+git clone -q "$SRC" "$T/src" && cd "$T/src" && git checkout -q "$(git -C "$SRC" rev-parse HEAD)" && git config user.email e2e@test && git config user.name e2e
 git init -q --bare "$T/repo.git"
 release 9.8.0
 
