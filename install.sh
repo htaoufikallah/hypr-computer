@@ -132,6 +132,13 @@ else
     [ -e "$DIR.prev" ] && FROM=prev-dir
   fi
 fi
+if [ "$DRY" = 0 ] && [[ $REF == v* ]] && [ "$(version_of "$DIR")" != "$REF" ]; then
+  found=$(version_of "$DIR")
+  if [ "$FROM" = prev-dir ]; then rm -rf "$DIR" && mv "$DIR.prev" "$DIR"
+  elif [ -n "$FROM" ]; then git -C "$DIR" -c advice.detachedHead=false checkout --quiet --force "$FROM"
+  else rm -rf "$DIR"; fi
+  die "release $REF is broken: its plugin.json says ${found:-no version}. Nothing was changed; please report it at $REPO/issues"
+fi
 if [ "$DRY" = 0 ] && [ -n "$FROM" ] && [ "$FROM" != prev-dir ] && [ "$(git -C "$DIR" rev-parse HEAD)" = "$FROM" ]; then
   info "already up to date ($(version_of "$DIR"))"
   FROM=""

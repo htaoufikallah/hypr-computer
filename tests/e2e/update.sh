@@ -24,7 +24,7 @@ release() {
   [ "${2:-}" = broken ] && sed -i 's/REQUIRED_TOOLS = ("hyprctl"/REQUIRED_TOOLS = ("no-such-tool", "hyprctl"/' server.py
   git add -A && git commit -qm "v$1" && git tag "v$1" && git push -q "$T/repo.git" HEAD:refs/heads/main "v$1"
 }
-git clone -q "$SRC" "$T/src" && cd "$T/src" && git checkout -q "$(git -C "$SRC" rev-parse HEAD)" && git config user.email e2e@test && git config user.name e2e
+git clone -q "$SRC" "$T/src" && cd "$T/src" && git -c advice.detachedHead=false checkout -q "$(git -C "$SRC" rev-parse HEAD)" && git config user.email e2e@test && git config user.name e2e
 git init -q --bare "$T/repo.git"
 release 9.8.0
 
@@ -53,5 +53,11 @@ echo "## broken release"
 release 9.9.1 broken
 check "update exits non-zero" '! hypr-computer update --no-system > "$T/out" 2>&1'
 check "rolls back to the previous release" '[ "$(hypr-computer version)" = 9.9.0 ]'
+
+echo "## release tag that doesn't match plugin.json"
+git revert --no-edit HEAD >/dev/null && git tag v9.9.9 && git push -q "$T/repo.git" HEAD:refs/heads/main v9.9.9
+before=$(git -C "$inst" rev-parse HEAD)
+check "update refuses the mismatched tag" '! hypr-computer update --no-system > "$T/out" 2>&1 && grep -q "v9.9.9 is broken" "$T/out"'
+check "keeps the installed release" '[ "$(git -C "$inst" rev-parse HEAD)" = "$before" ]'
 
 [ "$fails" = 0 ] && echo "all passed" || { echo "$fails failed"; exit 1; }
