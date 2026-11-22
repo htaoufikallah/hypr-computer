@@ -60,4 +60,8 @@ before=$(git -C "$inst" rev-parse HEAD)
 check "update refuses the mismatched tag" '! hypr-computer update --no-system > "$T/out" 2>&1 && grep -q "v9.9.9 is broken" "$T/out"'
 check "keeps the installed release" '[ "$(git -C "$inst" rev-parse HEAD)" = "$before" ]'
 
+echo "## first agent start, with a fresh uv cache"
+UV_CACHE_DIR="$T/uv-cache" bash "$T/src/install.sh" --no-system --dir="$T/inst2" --ref=v9.9.0 --yes --clients=none >"$T/out" 2>&1 || true
+check "the installed server starts offline" '[ "$(UV_CACHE_DIR="$T/uv-cache" UV_OFFLINE=1 uv run --quiet --script "$T/inst2/server.py" --version)" = 9.9.0 ]'
+
 [ "$fails" = 0 ] && echo "all passed" || { echo "$fails failed"; exit 1; }
