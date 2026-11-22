@@ -6,9 +6,10 @@ The installer:
 
 1. Downloads the latest release to `~/.local/share/hypr-computer`.
 2. Installs `grim`, `wtype`, `xkbcli` and `uv` with `sudo`, only if any of them is missing. On Omarchy they're usually all there, and no `sudo` is needed.
-3. Runs a self-check, which clicks nothing and types no text.
-4. Registers hypr-computer with each agent you've used: Claude Code, Codex, opencode, Gemini CLI and Cursor.
-5. Adds the `hypr-computer` command to `~/.local/bin`.
+3. Downloads the Python dependencies at the versions pinned in `server.py.lock`, so agents start without network access.
+4. Runs a self-check, which clicks nothing and types no text.
+5. Registers hypr-computer with each agent you've used: Claude Code, Codex, opencode, Gemini CLI and Cursor.
+6. Adds the `hypr-computer` command to `~/.local/bin`.
 
 To pass options, put them after `bash -s --`:
 
@@ -55,7 +56,7 @@ On v0.5 or older there's no `hypr-computer` command yet. Run the install command
 | --- | --- |
 | `hypr-computer update` | Install the latest release |
 | `hypr-computer check` | Run the self-check, which shows a PASS or FAIL line for each requirement |
-| `hypr-computer stop` | Block every click, key press and typing call from all agents, at once |
+| `hypr-computer stop` | Block every tool call from all agents, screenshots included, at once |
 | `hypr-computer resume` | Allow them again |
 | `hypr-computer version` | Show the installed version |
 
@@ -81,7 +82,7 @@ These are the tools your agent gets:
 | `list_windows` | Lists open windows with their workspace, title and position |
 | `cursor_position` | Reports where the pointer is |
 
-`click`, `type_text`, `key` and `scroll` take `screenshot=true` to return the updated screen in the same call. Coordinates are always pixels in the most recent screenshot.
+Every action takes `screenshot=true` to return the updated screen in the same call. `batch` and `open_url` return one unless you pass `screenshot=false`. Each action's result also names the active window and the pointer position. Coordinates are always pixels in the most recent screenshot.
 
 ## Settings
 
@@ -94,24 +95,27 @@ Everything works without configuration. To change a default, set one of these en
 | `HYPR_COMPUTER_MAX_EDGE` | `1456` | Screenshot size (long edge, in pixels). Lower it for models with a smaller image limit |
 | `HYPR_COMPUTER_SETTLE_MS` | `500` | How long a screenshot right after an action waits for animations |
 | `HYPR_COMPUTER_TOOLS` | `all` | `core` drops `batch`, `zoom`, `open_url`, `focus_window` and `launch_app`, to save tokens |
-| `HYPR_COMPUTER_RECORD_DIR` | off | Saves every step and screenshot to this folder, so you can review what an agent did |
+| `HYPR_COMPUTER_FILE_URLS` | none | Colon-separated folders whose files `open_url` may open as `file://` URLs. Without it, `open_url` opens only `http` and `https` URLs |
+| `HYPR_COMPUTER_RECORD_DIR` | off | Saves every step, its timing and its screenshot to this folder, so you can review what an agent did. The folder it creates and the files it writes are readable only by you. Typed text is saved as its length only |
 
 ## Privacy
 
 Nothing about you or your screen leaves your machine through hypr-computer.
 
 - **No telemetry, analytics or crash reports.** There's no tracking ID or account, and nothing to opt out of.
-- **No network access.** The server connects only to your compositor, over local sockets, and runs only local tools (`hyprctl`, `grim`, `wtype`, `xkbcli`, `gtk-launch`). The whole server is about 950 lines of Python in [`server.py`](../server.py) and [`wl_input.py`](../wl_input.py), so you can check this yourself.
+- **No network access.** The server connects only to your compositor, over local sockets, and runs only local tools (`grim`, `wtype`, `xkbcli`, `gtk-launch`, `xdg-mime`). The whole server is about 1,100 lines of Python in [`server.py`](../server.py) and [`wl_input.py`](../wl_input.py), so you can check this yourself.
 - **Screenshots go only to your agent.** Your agent sends them to its model provider under that provider's terms. That part depends on the agent you choose.
-- **Nothing is stored.** Screenshots live briefly in a temporary file and are then deleted, unless you turn on `HYPR_COMPUTER_RECORD_DIR`.
-- **Network use is limited to installing and updating.** The installer and `hypr-computer update` download releases from GitHub and missing packages from your distribution. On first start, `uv` fetches the MCP Python SDK from PyPI.
+- **Nothing is stored.** Screenshots stay in memory and never reach the disk, unless you turn on `HYPR_COMPUTER_RECORD_DIR`.
+- **Network use is limited to installing and updating.** The installer and `hypr-computer update` download releases from GitHub, missing packages from your distribution, and the pinned Python dependencies (the MCP SDK and Pillow) from PyPI. A Claude Code plugin install downloads those dependencies on its first start instead.
 
 ## Safety
 
 - **On-screen notice.** When an agent starts acting after a minute of quiet, Hyprland shows "An AI agent is controlling this desktop", with how to stop it.
-- **Stop switch.** `hypr-computer stop` blocks every click, key press and typing call from all agents until you run `hypr-computer resume`. Agents are told to ask you before going on. To bind it to a key, add this to your Hyprland Lua config:
+- **Stop switch.** `hypr-computer stop` blocks every tool call from all agents, screenshots included, until you run `hypr-computer resume`. A drag in progress stops at its next step. Agents are told to ask you before going on. To bind it to a key, add this to your Hyprland Lua config:
   ```lua
   hl.bind("SUPER + CTRL + ESCAPE", hl.dsp.exec_cmd("touch $XDG_RUNTIME_DIR/hypr-computer.stop"))
   ```
-- **Deny-list.** Agents can't click or type into 1Password, Bitwarden, KeePassXC, GNOME Secrets, Seahorse, Proton Pass, polkit or pinentry. Both the focused window and the window under the pointer are checked. Change the list with `HYPR_COMPUTER_DENY`.
+- **Deny-list.** Agents can't click or type into 1Password, Bitwarden, KeePassXC, GNOME Secrets, Seahorse, Proton Pass, polkit or pinentry. Both the focused window and the window under the pointer are checked, for every point of a move or a drag too. Change the list with `HYPR_COMPUTER_DENY`.
+- **Web pages only.** `open_url` refuses `file://` URLs unless you list their folders in `HYPR_COMPUTER_FILE_URLS`.
+- **Text on the screen is not an instruction.** The server tells agents that web pages, documents and messages are data, and that they should do only what you asked.
 - **Your agent's approval prompts still apply.** Don't leave an agent unattended with sensitive apps open.
