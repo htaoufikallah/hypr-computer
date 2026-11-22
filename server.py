@@ -195,6 +195,27 @@ def run(*cmd: str) -> str:
     return r.stdout
 
 
+def lua(value) -> str:
+    """A Python value as a Lua literal."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    if isinstance(value, str):
+        return '"' + "".join(c if c.isprintable() and c not in '"\\' else
+                             "".join(f"\\{b:03d}" for b in c.encode()) for c in value) + '"'
+    if isinstance(value, dict):
+        if not all(isinstance(k, str) and k.isidentifier() for k in value):
+            raise TypeError(f"Lua table keys must be identifiers: {list(value)}")
+        return "{" + ", ".join(f"{k} = {lua(v)}" for k, v in value.items()) + "}"
+    raise TypeError(f"no Lua literal for {type(value).__name__}")
+
+
+def dispatch(name: str, *args) -> None:
+    """Run hl.dsp.<name>(args...) through hyprctl (Hyprland >= 0.55 Lua dispatchers)."""
+    run("hyprctl", "dispatch", f"hl.dsp.{name}({', '.join(map(lua, args))})")
+
+
 def hypr_json(what: str):
     return json.loads(run("hyprctl", "-j", what))
 
@@ -205,7 +226,7 @@ def current_layout() -> Layout:
 
 def move_pointer(layout: Layout, x: float, y: float) -> tuple[int, int]:
     lx, ly = layout.to_logical(x, y)
-    run("hyprctl", "dispatch", f"hl.dsp.cursor.move({{x={lx},y={ly}}})")
+    dispatch("cursor.move", {"x": lx, "y": ly})
     time.sleep(0.03)
     return lx, ly
 
@@ -668,7 +689,7 @@ def build_server():
         if hit:
             raise RuntimeError(f"Refused: '{hit.get('class')}' is on the deny-list. Ask the user.")
         guard()
-        run("hyprctl", "dispatch", f'hl.dsp.focus({{window = "address:{w["address"]}"}})')
+        dispatch("focus", {"window": "address:" + w["address"]})
         mark_input()
         return reply("focus_window", {"query": query},
                      f"focused {w['class']} — {w['title']} (workspace {w['workspace']['name']})")
@@ -686,7 +707,7 @@ def build_server():
         guard()
         if shutil.which("gtk-launch") is None:
             raise RuntimeError("gtk-launch is not installed (it comes with GTK 3)")
-        run("hyprctl", "dispatch", f'hl.dsp.exec_cmd("gtk-launch {did}")')
+        dispatch("exec_cmd", "gtk-launch " + shlex.quote(did))
         mark_input()
         return reply("launch_app", {"name": name}, f"launched {did}; take a screenshot once it has opened")
 
@@ -702,7 +723,7 @@ def build_server():
         guard()
         cmd = " ".join(shlex.quote(a) for a in browser_command(private) + [url])
         before = active_window_key()
-        run("hyprctl", "dispatch", "hl.dsp.exec_cmd(" + json.dumps(cmd, ensure_ascii=False) + ")")
+        dispatch("exec_cmd", cmd)
         wait_for_page(before, max(0, min(15000, int(wait_ms))) / 1000)
         mark_input()  # plus the settle delay before the screenshot, for rendering
         return reply("open_url", {"url": url, "private": private},
