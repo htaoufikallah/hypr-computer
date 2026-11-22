@@ -42,7 +42,8 @@ def remote(host: str, script: str, timeout: int = 120) -> subprocess.CompletedPr
 
 def sync_server(host: str, src: Path, label: str) -> str:
     dest = f"{BENCH}/server-{label}"
-    files = [str(src / f) for f in ("server.py", "server.py.lock", "wl_input.py") if (src / f).exists()]
+    files = [str(src / f) for f in ("server.py", "server.py.lock", "wl_input.py", "atspi_helper.py")
+             if (src / f).exists()]
     if host == "local":
         subprocess.run(["mkdir", "-p", dest], check=True)
         subprocess.run(["cp", *files, dest], check=True)

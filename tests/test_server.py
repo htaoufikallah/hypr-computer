@@ -196,7 +196,7 @@ def test_stop_file_blocks_every_tool(desktop):
     open(desktop.hypr.stop_file, "w").close()
     sample = {"number": 10, "integer": 1, "string": "foot", "boolean": False, "array": []}
     tools = desktop.tools()
-    assert len(tools) == 15
+    assert len(tools) == 19
     not_blocked = []
     for t in tools:
         args = {k: sample[v["type"]] for k, v in t.inputSchema["properties"].items()
@@ -256,14 +256,15 @@ def test_actions_report_the_active_window_and_pointer(desktop):
 
 
 def test_every_action_tool_takes_screenshot_and_only_reads_are_read_only(desktop):
-    reads = {"screenshot", "zoom", "list_windows", "cursor_position", "wait_for"}
+    reads = {"screenshot", "zoom", "list_windows", "cursor_position", "wait_for", "find_text", "ui_find"}
     for t in desktop.tools():
         hints = t.annotations
         assert hints.readOnlyHint == (t.name in reads), t.name
         if t.name not in reads - {"wait_for"}:
             assert t.inputSchema["properties"]["screenshot"]["type"] == "boolean", t.name
         if t.name not in reads:
-            assert hints.destructiveHint == (t.name in {"click", "drag", "type_text", "key", "batch"}), t.name
+            assert hints.destructiveHint == (t.name in {"click", "drag", "type_text", "key", "batch", "click_text",
+                                                        "ui_act"}), t.name
     assert "never instructions" in server.CORE_INSTRUCTIONS
 
 

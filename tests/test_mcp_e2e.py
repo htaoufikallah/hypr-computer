@@ -14,7 +14,8 @@ ROOT = os.path.join(os.path.dirname(__file__), "..")
 CORE_TOOLS = {"screenshot", "click", "move", "drag", "scroll", "type_text", "key", "cursor_position",
               "list_windows"}
 TOOLS = {"screenshot", "click", "move", "drag", "scroll", "type_text", "key", "batch", "zoom",
-         "focus_window", "launch_app", "open_url", "cursor_position", "list_windows", "wait_for"}
+         "focus_window", "launch_app", "open_url", "cursor_position", "list_windows", "wait_for",
+         "find_text", "click_text", "ui_find", "ui_act"}
 RESERVED_BY_CLAUDE_CODE = {"computer-use"}
 
 
