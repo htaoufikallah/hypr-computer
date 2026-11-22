@@ -12,7 +12,7 @@ It was built and tested on Omarchy running on Asahi Linux on an Apple M3 Max.
 Run this one command on the Linux machine:
 
 ```bash
-curl -fsSL malik-na.github.io/hc | bash
+curl -fsSL malik-na.github.io/hypr-computer | bash
 ```
 
 It shows what it will do and asks before starting. Then it:
@@ -28,7 +28,7 @@ It shows what it will do and asks before starting. Then it:
 Then restart your agent. To update later, run the same command again.
 
 Options go after `bash -s --`, for example
-`curl -fsSL malik-na.github.io/hc | bash -s -- --clients=claude --yes`:
+`curl -fsSL malik-na.github.io/hypr-computer | bash -s -- --clients=claude --yes`:
 
 | Option | Effect |
 | --- | --- |
@@ -62,7 +62,7 @@ You are probably an agent asked to set up computer use on this machine.
    `codex`, `opencode`, `gemini` or `cursor`. Leave out `--clients` to register
    every agent whose config folder exists.
    ```bash
-   curl -fsSL malik-na.github.io/hc | bash -s -- --yes --clients=<client>
+   curl -fsSL malik-na.github.io/hypr-computer | bash -s -- --yes --clients=<client>
    ```
    If `sudo` can't prompt from your environment, ask the user to run the command
    themselves in a terminal.

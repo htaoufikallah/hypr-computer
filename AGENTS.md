@@ -3,7 +3,7 @@
 Asked to set up computer use from this repo? Follow the "For AI agents: setup
 instructions" section of README.md. In short: confirm Hyprland 0.55 or newer,
 get the user's OK for sudo, then run
-`curl -fsSL malik-na.github.io/hc | bash -s -- --yes --clients=<your client>`.
+`curl -fsSL malik-na.github.io/hypr-computer | bash -s -- --yes --clients=<your client>`.
 
 When working on the code itself:
 
