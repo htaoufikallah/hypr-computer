@@ -1,11 +1,13 @@
-"""Unit tests for the pure helpers. Run: uv run --with pytest --with 'mcp<2' pytest -q"""
+"""Unit tests for the pure helpers. Run: uv run --no-project --with pytest --with 'mcp<2' pytest -q tests"""
 import os
+import struct
 import sys
 
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import server  # noqa: E402
+import wl_input  # noqa: E402
 
 MBP = {"name": "eDP-1", "x": 0, "y": 0, "width": 3456, "height": 2234, "scale": 2, "transform": 0}
 
@@ -43,11 +45,14 @@ def test_no_monitors_raises():
         server.layout_from_monitors([])
 
 
-def test_parse_combo_and_chord_order():
+def test_parse_combo():
     assert server.parse_combo("super+Return") == [125, 28]
     assert server.parse_combo("Ctrl + Shift + T") == [29, 42, 20]
-    assert server.chord_args([29, 38]) == ["29:1", "38:1", "38:0", "29:0"]
     assert server.parse_combo("F12") == [88]
+    assert server.parse_combo("ctrl+plus") == [29, 13]
+    assert server.parse_combo("ctrl++") == [29, 13]
+    assert server.parse_combo("ctrl+minus") == [29, 12]
+    assert server.parse_combo("PgDn") == [109]
 
 
 @pytest.mark.parametrize("bad", ["", "ctrl+nope", "hyper+a"])
@@ -56,34 +61,118 @@ def test_parse_combo_rejects_unknown(bad):
         server.parse_combo(bad)
 
 
-def test_text_split_us_layout():
-    cmds = server.text_commands("results?q=ü é!", us_layout=True)
-    assert [c[0] for c in cmds] == ["ydotool", "wtype", "ydotool", "wtype", "ydotool"]
-    assert cmds[0][-1] == "results?q="
-    assert cmds[1][-1] == "ü"
-    assert cmds[1][1:3] == ["-k", "Shift_L"]  # absorbs Chromium's dropped first key
+def test_text_runs_split_ascii_and_non_ascii():
+    assert server.text_runs("results?q=ü é!\n") == [
+        ("vk", "results?q="), ("wtype", "ü"), ("vk", " "), ("wtype", "é"), ("vk", "!\n")]
+    assert server.text_runs("") == []
 
 
-def test_text_non_us_layout_uses_wtype_only():
-    cmds = server.text_commands("a?ü", us_layout=False)
-    assert [c[0] for c in cmds] == ["wtype", "wtype"]
+def test_us_table_covers_printable_ascii():
+    for ch in map(chr, range(32, 127)):
+        assert wl_input.VirtualInput.typeable(ch), ch
+    assert wl_input._US["A"] == (30, True)
+    assert wl_input._US["?"] == (53, True)
+    assert wl_input._US["/"] == (53, False)
+    assert wl_input._US["\n"] == (28, False)
+    assert not wl_input.VirtualInput.typeable("ü")
 
 
-def test_us_layout_detection():
-    us = {"keyboards": [{"name": "ydotoold-virtual-device", "main": True,
-                         "active_keymap": "English (US)"}]}
-    de = {"keyboards": [{"name": "ydotoold-virtual-device", "main": True,
-                         "active_keymap": "German"}]}
-    dv = {"keyboards": [{"name": "kbd", "main": True, "active_keymap": "English (Dvorak)"}]}
-    assert server.is_us_layout(us)
-    assert not server.is_us_layout(de)
-    assert not server.is_us_layout(dv)
-    assert server.is_us_layout({"keyboards": []})
+def test_wayland_string_encoding_is_padded():
+    enc = wl_input._string("wl_seat")  # 7 chars + NUL = 8, already aligned
+    assert struct.unpack("<I", enc[:4])[0] == 8 and len(enc) == 12
+    enc = wl_input._string("abc")  # 3 + NUL = 4
+    assert len(enc) == 8
+    enc = wl_input._string("abcd")  # 4 + NUL = 5 -> padded to 8
+    assert len(enc) == 12 and enc.endswith(b"\0\0\0\0")
+
+
+def test_deny_list_matches_class_or_title():
+    pat = server.deny_pattern()
+    assert server.denied_window([{"class": "org.keepassxc.KeePassXC", "title": "db"}], pat)
+    assert server.denied_window([{"class": "chromium", "title": "Bitwarden Web Vault"}], pat)
+    assert server.denied_window([{"class": "chromium", "title": "YouTube"}], pat) is None
+    assert server.denied_window([{}], pat) is None
+
+
+def test_deny_list_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("HYPR_COMPUTER_DENY", "")
+    assert server.deny_pattern() is None
+
+
+def test_windows_at_point():
+    clients = [
+        {"class": "a", "at": [0, 0], "size": [800, 600], "workspace": {"id": 1}},
+        {"class": "b", "at": [800, 0], "size": [800, 600], "workspace": {"id": 1}},
+        {"class": "c", "at": [0, 0], "size": [800, 600], "workspace": {"id": 2}},
+    ]
+    assert [c["class"] for c in server.windows_at(clients, 100, 100, {1})] == ["a"]
+    assert [c["class"] for c in server.windows_at(clients, 900, 100, {1})] == ["b"]
+    assert server.windows_at(clients, 2000, 100, {1}) == []
 
 
 def test_session_env_forces_utf8(monkeypatch):
     for k in ("LC_ALL", "LC_CTYPE", "LANG"):
         monkeypatch.delenv(k, raising=False)
     assert server.session_env()["LC_ALL"] == "C.UTF-8"
-    monkeypatch.setenv("LANG", "en_US.UTF-8")
-    assert "LC_ALL" not in server.session_env() or os.environ.get("LC_ALL")
+
+
+def test_settle_waits_only_right_after_input(monkeypatch):
+    monkeypatch.setattr(server, "SETTLE_S", 0.2)
+    server._last_input = 0.0
+    assert server.settle() == 0.0
+    server.mark_input()
+    waited = server.settle()
+    assert 0.15 < waited <= 0.2
+
+
+def test_run_steps_stops_at_first_failure(monkeypatch):
+    calls = []
+
+    def ok(**kw):
+        calls.append(kw)
+        return "ok"
+
+    def boom(**kw):
+        raise RuntimeError("nope")
+
+    monkeypatch.setattr(server, "ACTIONS", {"a": ok, "b": boom})
+    log, all_ok = server.run_steps([{"action": "a", "x": 1}, {"action": "b"}, {"action": "a"}])
+    assert not all_ok and len(calls) == 1 and calls[0] == {"x": 1}
+    assert "step 2 (b) failed: nope" in log[-1]
+    log, all_ok = server.run_steps([{"action": "zzz"}])
+    assert not all_ok and "unknown action" in log[0]
+
+
+def test_matching_windows_prefers_exact_class_then_recent():
+    clients = [
+        {"class": "foot", "title": "chromium notes", "focusHistoryID": 0},
+        {"class": "chromium", "title": "YouTube", "focusHistoryID": 3},
+        {"class": "chromium", "title": "Docs", "focusHistoryID": 1},
+    ]
+    hits = server.matching_windows(clients, "Chromium")
+    assert [h["title"] for h in hits] == ["Docs", "YouTube", "chromium notes"]
+    assert server.matching_windows(clients, "nothing") == []
+
+
+def test_desktop_entries(tmp_path, monkeypatch):
+    apps = tmp_path / "applications"
+    apps.mkdir()
+    (apps / "org.example.Viewer.desktop").write_text("[Desktop Entry]\nName=Image Viewer\nExec=viewer\n")
+    (apps / "hidden.desktop").write_text("[Desktop Entry]\nName=Hidden\nNoDisplay=true\n")
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_DATA_DIRS", str(tmp_path / "none"))
+    found = server.desktop_entries()
+    assert found["image viewer"] == "org.example.Viewer"
+    assert found["org.example.viewer"] == "org.example.Viewer"
+    assert "hidden" not in found
+
+
+def test_record_is_off_by_default_and_local_when_on(tmp_path, monkeypatch):
+    monkeypatch.delenv("HYPR_COMPUTER_RECORD_DIR", raising=False)
+    server.record("click", {"x": 1}, "clicked")  # no-op, must not raise
+    monkeypatch.setenv("HYPR_COMPUTER_RECORD_DIR", str(tmp_path / "rec"))
+    server.record("click", {"x": 1}, "clicked")
+    server.record("screenshot", {}, "shot", b"\xff\xd8jpeg")
+    lines = (tmp_path / "rec" / "steps.jsonl").read_text().splitlines()
+    assert len(lines) == 2 and '"tool": "click"' in lines[0]
+    assert (tmp_path / "rec" / "0001.jpg").read_bytes() == b"\xff\xd8jpeg"

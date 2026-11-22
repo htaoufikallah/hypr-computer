@@ -6,7 +6,7 @@
 # Options (pass after `bash -s --`):
 #   --yes            don't ask for confirmation (for agents / unattended use)
 #   --dry-run        print what would happen, change nothing
-#   --no-system      skip package install / uinput setup (already done)
+#   --no-system      skip installing missing system packages
 #   --clients=LIST   comma list of clients to register: claude,codex,opencode,gemini,cursor
 #                    default: each of those whose config folder exists; "none" to skip
 #   --dir=PATH       install location (default ~/.local/share/hypr-computer)
@@ -48,10 +48,10 @@ minor=$(echo "$ver" | cut -d. -f2)
 [ "$(echo "$ver" | cut -d. -f1)" -gt 0 ] || [ "${minor:-0}" -ge 55 ] ||
   die "Hyprland $ver is too old; 0.55 or newer is required."
 info "Hyprland $ver"
-PACMAN=0; command -v pacman >/dev/null && PACMAN=1
-if [ "$SYSTEM" = 1 ] && [ "$PACMAN" = 0 ]; then
-  die "automatic setup supports pacman-based distros only. Install grim, wtype, ydotool and uv,
-       apply scripts/install-system.sh by hand, then re-run with --no-system."
+MISSING=()
+for t in grim wtype xkbcli uv; do command -v "$t" >/dev/null || MISSING+=("$t"); done
+if [ "$SYSTEM" = 1 ] && [ "${#MISSING[@]}" -gt 0 ] && ! command -v pacman >/dev/null; then
+  die "missing ${MISSING[*]}; install them with your package manager, then re-run with --no-system."
 fi
 
 # ------------------------------------------------------------------- plan
@@ -73,8 +73,11 @@ detect() {
 bold ""
 bold "hypr-computer will:"
 info "1. download $REPO to $DIR"
-[ "$SYSTEM" = 1 ] && info "2. use sudo to install grim, wtype, ydotool (and uv if missing), allow your user
-       to use /dev/uinput, load uinput at boot, and enable the ydotool user service"
+if [ "$SYSTEM" = 1 ] && [ "${#MISSING[@]}" -gt 0 ]; then
+  info "2. use sudo to install missing packages: ${MISSING[*]}"
+else
+  info "2. no system changes needed (no sudo)"
+fi
 info "3. run a read-only self-check"
 info "4. register the MCP server with: ${CLIENTS:-no clients}"
 if [ "$YES" = 0 ] && [ "$DRY" = 0 ]; then
@@ -101,7 +104,7 @@ info "ok"
 
 # ----------------------------------------------------------------- system
 if [ "$SYSTEM" = 1 ]; then
-  step "System setup (sudo)"
+  step "System packages"
   if [ "$DRY" = 1 ]; then info "[dry-run] $DIR/scripts/install-system.sh"
   else bash "$DIR/scripts/install-system.sh"; fi
 fi

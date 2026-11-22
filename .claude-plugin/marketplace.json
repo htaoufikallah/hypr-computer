@@ -1,12 +1,14 @@
 {
   "name": "hypr-computer",
-  "owner": { "name": "Naeem Malik" },
-  "description": "Computer use for Hyprland on Linux.",
+  "owner": {
+    "name": "Naeem Malik"
+  },
+  "description": "Private, lightweight computer use for Hyprland.",
   "plugins": [
     {
       "name": "hypr-computer",
       "source": "./",
-      "description": "Computer use for Hyprland on Linux: screenshots, clicks, typing and shortcuts through an MCP server."
+      "description": "Private, lightweight computer use for Hyprland: screenshots, clicks, typing, batching and window tools through a local MCP server. No telemetry, no root."
     }
   ]
 }
