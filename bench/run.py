@@ -151,7 +151,8 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--model")
     ap.add_argument("--timeout", type=int, default=900, help="seconds per task")
-    ap.add_argument("--setup-only", action="store_true", help="set up, check (expect fail), tear down; no agent")
+    ap.add_argument("--setup-only", action="store_true",
+                    help="no agent: set up, run each check (it must fail), tear down")
     args = ap.parse_args()
 
     server = sync_server(args.host, args.sync, args.label) if args.sync else args.server
@@ -193,6 +194,14 @@ def main() -> int:
                 f.write(json.dumps(row) + "\n")
             print(f"[{task.id} #{rep + 1}] {'PASS' if ok else 'FAIL'} {json.dumps(stats)}", flush=True)
     os.unlink(cfg)
+
+    if args.setup_only:
+        broken = sorted({r["task"] for r in rows if r["success"]})
+        if broken:
+            print(f"\nBROKEN CHECK: {', '.join(broken)} passed with no agent, so a pass proves nothing. "
+                  "Fix the check in bench/tasks.py until it fails on the untouched setup.")
+            return 1
+        print(f"\nall {len(rows)} checks fail on the untouched setup, as they must")
 
     if not args.setup_only:
         print_table(rows)
