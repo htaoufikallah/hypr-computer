@@ -29,7 +29,7 @@ The [`bench/`](../bench/README.md) folder runs real desktop tasks with Claude Co
 | Time | 18 s | **12 s** |
 | Cost (notional API) | $0.085 | **$0.063** |
 
-**Compared with cua-driver 0.57.** MacBook Pro M3 Max, Hyprland 0.56.2, first five tasks, 2 repetitions. [cua-driver](https://github.com/trycua/cua) ran as shipped, without its optional Hyprland plugin:
+**Compared with cua-driver 0.57.** Hyprland 0.56.2, first five tasks, 2 repetitions. [cua-driver](https://github.com/trycua/cua) ran as shipped, without its optional Hyprland plugin:
 
 | Per task | hypr-computer v0.4 | cua-driver 0.57 |
 | --- | --- | --- |
@@ -66,4 +66,4 @@ hypr-computer is a thin layer over these projects:
 
 The ideas for batching, returning a screenshot with an action, `zoom`, window focus, app launching and recording came from [cua](https://github.com/trycua/cua)'s cua-driver (MIT). No code was copied. None of these projects are bundled or modified here; each keeps its own license.
 
-Built and tested on [Omarchy](https://omarchy.org) with Hyprland 0.56 and 0.57, on a MacBook Pro M3 Max and a MacBook Air M1 running Arch Linux ARM.
+Built and tested on [Omarchy](https://omarchy.org) with Hyprland 0.56 and 0.57, on Apple Silicon MacBooks running Arch Linux ARM.
