@@ -1,6 +1,6 @@
 # Benchmark
 
-Five fixed desktop tasks, each run by Claude Code in headless mode with **only**
+Six fixed desktop tasks, each run by Claude Code in headless mode with **only**
 the hypr-computer tools: no shell and no file access. For each task, the runner
 records whether it passed, how many turns it took, how many screenshots, input
 and output tokens, time and cost. Use it to check whether a change actually
@@ -13,6 +13,7 @@ makes computer use better.
 | `scroll-find` | Find one code in a 500-row table, then enter it in a form at the bottom | Page title set by the form |
 | `terminal` | Create a file with given contents by typing in a terminal | File contents |
 | `cross-app` | Read a code in Chromium and write it to a file with the terminal | File contents |
+| `private-cookie` | Open a page in a private window and answer its cookie banner | Page title, which also says whether the window was private |
 
 Names, codes and target rows are random for each repetition, so a pass can't
 come from guessing. Each run's values depend on `--seed`, so two versions see
