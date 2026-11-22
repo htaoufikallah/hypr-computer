@@ -271,5 +271,54 @@ def build_server():
     return mcp
 
 
+def self_check() -> int:
+    """Read-only health check for setup scripts and agents. Never clicks or types."""
+    results: list[tuple[bool, str, str]] = []
+
+    def fail(msg: str):
+        raise RuntimeError(msg)
+
+    def check(name: str, fn) -> None:
+        try:
+            results.append((True, name, fn() or "ok"))
+        except Exception as e:  # noqa: BLE001 - report every failure, keep going
+            results.append((False, name, str(e)))
+
+    for tool in REQUIRED_TOOLS:
+        check(f"{tool} installed", lambda t=tool: shutil.which(t) or fail("missing; run scripts/install-system.sh"))
+    env = session_env()
+    check("Hyprland reachable", lambda: run("hyprctl", "version").splitlines()[0])
+    check("monitors", lambda: "{:.0f}x{:.0f} logical".format(
+        current_layout().width, current_layout().height))
+    check("cursor position", lambda: run("hyprctl", "cursorpos").strip())
+    check("/dev/uinput writable", lambda: "ok" if os.access("/dev/uinput", os.W_OK)
+          else fail("no access; run scripts/install-system.sh, then log out and back in"))
+    check("ydotoold running", lambda: env["YDOTOOL_SOCKET"] if os.path.exists(env["YDOTOOL_SOCKET"])
+          else fail("not running; systemctl --user enable --now ydotool"))
+    check("keyboard layout", lambda: "US (ydotool typing)" if is_us_layout(
+        json.loads(run("hyprctl", "-j", "devices"))) else "non-US (wtype typing, slower)")
+
+    def shot() -> str:
+        with tempfile.NamedTemporaryFile(suffix=".jpg") as tmp:
+            run("grim", "-s", f"{current_layout().factor:.6f}", "-t", "jpeg", tmp.name)
+            return f"{os.path.getsize(tmp.name)} bytes"
+    check("screenshot", shot)
+
+    def mcp_sdk() -> str:
+        import mcp  # noqa: F401
+        from importlib.metadata import version
+        return f"mcp {version('mcp')}"
+    check("MCP SDK", mcp_sdk)
+
+    for ok, name, detail in results:
+        print(f"{'PASS' if ok else 'FAIL'}  {name}: {detail}")
+    failed = sum(not ok for ok, _, _ in results)
+    print("hypr-computer is ready." if not failed else f"{failed} check(s) failed.")
+    return 1 if failed else 0
+
+
 if __name__ == "__main__":
+    import sys
+    if "--check" in sys.argv[1:]:
+        sys.exit(self_check())
     build_server().run()
