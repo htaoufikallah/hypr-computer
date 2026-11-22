@@ -3,6 +3,7 @@ import os
 import re
 import shutil
 import socket
+import sys
 import tempfile
 import threading
 import time
@@ -23,6 +24,7 @@ class FakeHyprland:
         self.clients = clients or []
         self.active = active or {}
         self.cursor = (0, 0)
+        self.animations = [[{"name": "global", "overridden": True, "enabled": True, "speed": 1.0}], []]
         self.requests: list[str] = []
         self.on_request = lambda request: None
         self.readers: list[socket.socket] = []
@@ -61,7 +63,8 @@ class FakeHyprland:
 
     def reply(self, request: str) -> str:
         answers = {"j/monitors": self.monitors, "j/clients": self.clients, "j/activewindow": self.active,
-                   "j/cursorpos": {"x": self.cursor[0], "y": self.cursor[1]}, "j/version": {"version": "0.57.2"}}
+                   "j/cursorpos": {"x": self.cursor[0], "y": self.cursor[1]}, "j/version": {"version": "0.57.2"},
+                   "j/animations": self.animations}
         if request in answers:
             return json.dumps(answers[request])
         move = re.fullmatch(r"/dispatch hl\.dsp\.cursor\.move\(\{x = (-?\d+), y = (-?\d+)\}\)", request)
@@ -140,32 +143,75 @@ class FakeInput:
 
 FAKE_GRIM = r'''#!/usr/bin/env python3
 """grim that only captures at full resolution: `grim -t ppm -`. FAKE_GRIM_SIZE=WxH and
-FAKE_GRIM_MARK=x,y,side draw a white square at physical pixel (x, y) on a dark screen.
-FAKE_GRIM_MOVING=file,n moves the square right on each of the first n captures, counted in file."""
+FAKE_GRIM_MARK=x,y,side[;x,y,side...] draw white squares at physical pixels on a dark screen.
+FAKE_GRIM_MOVING=file,n moves them right on each of the first n captures, counted in file."""
 import os, sys
 if sys.argv[1:] != ["-t", "ppm", "-"]:
     sys.exit(f"fake grim: unsupported arguments {sys.argv[1:]}")
 w, h = map(int, os.environ["FAKE_GRIM_SIZE"].split("x"))
-mx, my, side = map(int, os.environ["FAKE_GRIM_MARK"].split(","))
+marks = [tuple(map(int, m.split(","))) for m in os.environ["FAKE_GRIM_MARK"].split(";") if m]
+shift = 0
 if os.environ.get("FAKE_GRIM_MOVING"):
     path, n = os.environ["FAKE_GRIM_MOVING"].split(",")
     shots = int(open(path).read() or 0) if os.path.exists(path) else 0
     open(path, "w").write(str(shots + 1))
-    mx += side * min(shots, int(n))
+    shift = min(shots, int(n))
 px = bytearray(b"\x20" * (w * h * 3))
-for row in range(my, my + side):
-    px[(row * w + mx) * 3:(row * w + mx + side) * 3] = b"\xff" * (side * 3)
+for mx, my, side in marks:
+    mx += side * shift
+    for row in range(my, my + side):
+        px[(row * w + mx) * 3:(row * w + mx + side) * 3] = b"\xff" * (side * 3)
 sys.stdout.buffer.write(b"P6\n%d %d\n255\n" % (w, h) + px)
 '''
 
+FAKE_TESSERACT = r'''#!/usr/bin/env python3
+"""tesseract reading `stdin stdout --psm 3 tsv` from a PGM image. Each bright patch reads as one line of
+text: the next of FAKE_OCR_TEXT's lines (separated by "|", default "Submit"), its words spread evenly across
+the patch. Each read adds a line to the file FAKE_OCR_RUNS, if set."""
+import os, re, sys
+if sys.argv[1:] == ["--version"]:
+    sys.exit(print("tesseract 5.5.4 (fake)"))
+if sys.argv[1:] != ["stdin", "stdout", "--psm", "3", "tsv"]:
+    sys.exit(f"fake tesseract: unsupported arguments {sys.argv[1:]}")
+data = sys.stdin.buffer.read()
+head = re.match(rb"P5\s+(\d+)\s+(\d+)\s+255\s", data)
+w, h = int(head[1]), int(head[2])
+px = memoryview(data)[head.end():]
+patches = []
+for y in range(h):
+    for m in re.finditer(rb"[\xc8-\xff]+", px[y * w:(y + 1) * w].tobytes()):
+        a, b = m.span()
+        p = next((p for p in patches if p[3] == y and p[0] < b and a < p[2]), None)
+        if p:
+            p[0], p[2], p[3] = min(p[0], a), max(p[2], b), y + 1
+        else:
+            patches.append([a, y, b, y + 1])
+if os.environ.get("FAKE_OCR_RUNS"):
+    open(os.environ["FAKE_OCR_RUNS"], "a").write("read\n")
+lines = (os.environ.get("FAKE_OCR_TEXT") or "Submit").split("|")
+print("level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext")
+print(f"1\t1\t0\t0\t0\t0\t0\t0\t{w}\t{h}\t-1\t")
+for i, (left, top, right, bottom) in enumerate(sorted(patches, key=lambda p: (p[1], p[0]))):
+    words = lines[i % len(lines)].split()
+    step = (right - left) / len(words)
+    print(f"4\t1\t{i + 1}\t1\t1\t0\t{left}\t{top}\t{right - left}\t{bottom - top}\t-1\t")
+    for j, word in enumerate(words):
+        print(f"5\t1\t{i + 1}\t1\t1\t{j + 1}\t{round(left + j * step)}\t{top}\t{round(step)}\t{bottom - top}\t95\t{word}")
+'''
 
-def fake_bin(directory: str) -> str:
+
+def fake_bin(directory: str, tesseract: bool = True) -> str:
+    """A folder with fake grim and tesseract, a hyprctl that must not run, and the test's python3, so a
+    PATH of this folder alone works."""
     os.makedirs(directory, exist_ok=True)
-    for name, body in (("grim", FAKE_GRIM), ("hyprctl", "#!/bin/sh\necho 'hyprctl must not run' >&2\nexit 1\n")):
+    fakes = [("grim", FAKE_GRIM), ("hyprctl", "#!/bin/sh\necho 'hyprctl must not run' >&2\nexit 1\n")]
+    for name, body in fakes + ([("tesseract", FAKE_TESSERACT)] if tesseract else []):
         path = os.path.join(directory, name)
         with open(path, "w") as f:
             f.write(body)
         os.chmod(path, 0o755)
+    if not os.path.exists(os.path.join(directory, "python3")):
+        os.symlink(sys.executable, os.path.join(directory, "python3"))
     return directory
 
 

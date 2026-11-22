@@ -7,6 +7,9 @@
 - **Clicks, scrolling and typing** go through [`wl_input.py`](../wl_input.py), a small Wayland client that creates a virtual pointer and keyboard through the standard `zwlr_virtual_pointer_v1` and `zwp_virtual_keyboard_v1` protocols. A click takes about 7 ms.
   - The keyboard uses its own US keymap, so shortcuts and ASCII text come out right whatever layout you've selected.
   - Text with accents or other scripts is typed with `wtype`.
+- **Reading text.** `find_text` and `click_text` run tesseract on the full-resolution capture of the screen or one window, so the positions they return map exactly onto screenshot pixels. A frame that was already read isn't read again. On the M1, reading a 621x750 window takes about 0.3 s, and the whole screen 0.4 to 0.75 s.
+- **Accessibility.** `ui_find` and `ui_act` read AT-SPI through [`atspi_helper.py`](../atspi_helper.py), run by the system Python, which has PyGObject. Each call reads one window, up to 5,000 elements or 3 seconds, and takes 0.1 to 0.25 s on the M1. A position is the window's place in Hyprland plus the element's place in the window, checked against the window's size. When they don't fit, as with GTK4's zeros or Chromium's mix of logical and device pixels, the position is left out rather than guessed.
+- **Deny-listed windows** are found in Hyprland's window list just before and just after each capture, and both places are painted black. A capture first waits out Hyprland's own animation time (read from its config) after anything moves, because Hyprland reports where a window is going, not where it is drawn.
 - **Session discovery.** The server finds your Hyprland session on its own, so it works even when the agent runs from SSH, tmux or a systemd service.
 
 ## Benchmarks
@@ -48,7 +51,7 @@ These benchmarks are small: a handful of tasks on two machines. Run them yoursel
 
 - Hyprland only.
 - Shortcuts use US key positions: `ctrl+z` always means the key labelled Z on a US keyboard.
-- No accessibility tree. The agent works from screenshots and `zoom`.
+- Accessibility trees depend on the app. Chromium shows its pages only when started with accessibility on, and terminals have none.
 - One agent at a time. Agents share your real pointer and keyboard focus.
 
 ## Acknowledgements
@@ -65,6 +68,8 @@ hypr-computer is a thin layer over these projects:
 | [wlr-protocols](https://gitlab.freedesktop.org/wlroots/wlr-protocols), [wayland-protocols](https://gitlab.freedesktop.org/wayland/wayland-protocols) | The virtual pointer and keyboard protocols | MIT |
 | [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk) | The MCP server | MIT |
 | [uv](https://github.com/astral-sh/uv) | Running the server and its Python dependencies | MIT or Apache-2.0 |
+| [Tesseract](https://github.com/tesseract-ocr/tesseract) | Reading text on screen (optional) | Apache-2.0 |
+| [AT-SPI](https://gitlab.gnome.org/GNOME/at-spi2-core), [PyGObject](https://gitlab.gnome.org/GNOME/pygobject) | Accessibility trees (optional) | LGPL-2.1-or-later |
 | [pytest](https://github.com/pytest-dev/pytest) | Tests | MIT |
 
 The ideas for batching, returning a screenshot with an action, `zoom`, window focus, app launching and recording came from [cua](https://github.com/trycua/cua)'s cua-driver (MIT). No code was copied. None of these projects are bundled or modified here; each keeps its own license.

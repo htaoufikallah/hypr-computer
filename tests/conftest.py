@@ -1,4 +1,5 @@
 import asyncio
+import collections
 import os
 import sys
 import time
@@ -53,6 +54,9 @@ def desktop(hypr, monkeypatch):
     monkeypatch.setattr(server, "_last_input", (0.0, 0.0))
     monkeypatch.setattr(server, "_last_action", 0.0)
     monkeypatch.setattr(server, "_waited", 0.0)
+    monkeypatch.setattr(server, "_ocr_cache", collections.OrderedDict())
+    monkeypatch.setattr(server, "_refs", {})
+    monkeypatch.setattr(server, "_goals", {})
     monkeypatch.delenv("HYPR_COMPUTER_TOOLS", raising=False)
     monkeypatch.delenv("HYPR_COMPUTER_RECORD_DIR", raising=False)
     d = Desktop(hypr, vi)
