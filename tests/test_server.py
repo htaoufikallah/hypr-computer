@@ -176,3 +176,50 @@ def test_record_is_off_by_default_and_local_when_on(tmp_path, monkeypatch):
     lines = (tmp_path / "rec" / "steps.jsonl").read_text().splitlines()
     assert len(lines) == 2 and '"tool": "click"' in lines[0]
     assert (tmp_path / "rec" / "0001.jpg").read_bytes() == b"\xff\xd8jpeg"
+
+
+def test_desktop_execs_reads_actions_and_drops_field_codes(tmp_path):
+    f = tmp_path / "b.desktop"
+    f.write_text("[Desktop Entry]\nName=B\nExec=browser %U\n\n[Desktop Action new-window]\nName=New Window\n"
+                 "Exec=browser\n\n[Desktop Action new-private-window]\nName=New Private Window\n"
+                 "Exec=browser --incognito\n")
+    ex = server.desktop_execs(str(f))
+    assert ex[""] == ["browser"]
+    assert ["browser", "--incognito"] in ex.values()
+
+
+def test_browser_command_override_adds_private_flag(monkeypatch):
+    monkeypatch.setenv("HYPR_COMPUTER_BROWSER", "chromium --user-data-dir=/tmp/x")
+    assert server.browser_command(False) == ["chromium", "--user-data-dir=/tmp/x"]
+    assert server.browser_command(True)[-1] == "--incognito"
+    monkeypatch.setenv("HYPR_COMPUTER_BROWSER", "/usr/bin/firefox")
+    assert server.browser_command(True) == ["/usr/bin/firefox", "--private-window"]
+
+
+def test_instructions_only_mention_registered_tools(monkeypatch):
+    monkeypatch.setenv("HYPR_COMPUTER_TOOLS", "core")
+    assert "open_url" not in server.CORE_INSTRUCTIONS
+    assert "open_url" in server.INSTRUCTIONS
+
+
+def test_page_ready_ignores_blank_and_loading_tabs():
+    before = ("0xa", "Docs - Chromium")
+    assert not server.page_ready(before, before)
+    assert not server.page_ready(before, ("0xb", "New Tab - Chromium"))
+    assert not server.page_ready(before, ("0xb", "New Incognito Tab - Chromium"))
+    assert not server.page_ready(before, ("", ""))
+    assert server.page_ready(before, ("0xb", "Example Domain - Chromium"))
+    assert server.page_ready(before, ("0xa", "Daily News - Chromium"))
+
+
+def test_update_note_once_when_disk_version_changes(tmp_path, monkeypatch):
+    pj = tmp_path / "plugin.json"
+    pj.write_text('{"version": "1.0.0"}')
+    monkeypatch.setattr(server, "PLUGIN_JSON", str(pj))
+    monkeypatch.setattr(server, "VERSION", "1.0.0")
+    monkeypatch.setattr(server, "_update_noted", False)
+    assert server.update_note() == ""
+    pj.write_text('{"version": "1.1.0"}')
+    note = server.update_note()
+    assert "1.1.0 is installed" in note and "restart" in note
+    assert server.update_note() == ""  # only once per session

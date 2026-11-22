@@ -10,11 +10,18 @@
 #   --clients=LIST   comma list of clients to register: claude,codex,opencode,gemini,cursor
 #                    default: each of those whose config folder exists; "none" to skip
 #   --dir=PATH       install location (default ~/.local/share/hypr-computer)
+#   --update         update an existing install (what `hypr-computer update` runs):
+#                    implies --yes and --clients=none
+#   --ref=REF        install this tag or branch instead of the latest release
 set -euo pipefail
 
-REPO="https://github.com/malik-na/hypr-computer"
+# Everything runs inside main(): bash reads a script lazily, and an update
+# rewrites this very file, so it must be fully parsed before anything runs.
+main() {
+REPO="${HYPR_COMPUTER_REPO:-https://github.com/malik-na/hypr-computer}"
 DIR="${HOME}/.local/share/hypr-computer"
-YES=0 DRY=0 SYSTEM=1 CLIENTS="auto"
+YES=0 DRY=0 SYSTEM=1 CLIENTS="auto" UPDATE=0 REF="" FROM="" FETCHED=0
+ARGS=("$@")
 for arg in "$@"; do
   case "$arg" in
     --yes|-y) YES=1 ;;
@@ -22,10 +29,14 @@ for arg in "$@"; do
     --no-system) SYSTEM=0 ;;
     --clients=*) CLIENTS="${arg#*=}" ;;
     --dir=*) DIR="${arg#*=}" ;;
-    -h|--help) sed -n '2,15p' "$0" 2>/dev/null || echo "see $REPO"; exit 0 ;;
+    --update) UPDATE=1 YES=1 ;;
+    --ref=*) REF="${arg#*=}" ;;
+    --from=*) FROM="${arg#*=}" FETCHED=1 ;;  # internal: set by the re-exec after an update
+    -h|--help) sed -n '2,19p' "$0" 2>/dev/null || echo "see $REPO"; exit 0 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
+[ "$UPDATE" = 1 ] && [ "$CLIENTS" = auto ] && CLIENTS=none
 
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
 step() { printf '\n\033[1;34m==>\033[0m \033[1m%s\033[0m\n' "$*"; }
@@ -33,6 +44,7 @@ info() { printf '    %s\n' "$*"; }
 warn() { printf '    \033[33m%s\033[0m\n' "$*"; }
 die()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 run()  { if [ "$DRY" = 1 ]; then info "[dry-run] $*"; else "$@"; fi; }
+version_of() { sed -n 's/.*"version": *"\([^"]*\)".*/v\1/p' "$1/.claude-plugin/plugin.json" 2>/dev/null | head -1 || true; }
 
 # ---------------------------------------------------------------- preflight
 step "Checking this machine"
@@ -70,9 +82,17 @@ detect() {
 [ "$CLIENTS" = "auto" ] && CLIENTS=$(detect)
 [ "$CLIENTS" = "none" ] && CLIENTS=""
 
+# The newest release tag (v1.2.3), so users only ever get tagged, tested code.
+if [ -z "$REF" ] && [ "$FETCHED" = 0 ]; then
+  REF=$(git ls-remote --tags --refs "$REPO" 'v*' 2>/dev/null | sed 's#.*refs/tags/##' | sort -V | tail -1 || true)
+  REF=${REF:-main}
+fi
+
+if [ "$FETCHED" = 0 ]; then
 bold ""
 bold "hypr-computer will:"
-info "1. download $REPO to $DIR"
+if [ -e "$DIR" ]; then info "1. update $DIR (now $(version_of "$DIR")) to $REF"
+else info "1. download $REF of $REPO to $DIR"; fi
 if [ "$SYSTEM" = 1 ] && [ "${#MISSING[@]}" -gt 0 ]; then
   info "2. use sudo to install missing packages: ${MISSING[*]}"
 else
@@ -85,22 +105,48 @@ if [ "$YES" = 0 ] && [ "$DRY" = 0 ]; then
   printf '\nContinue? [Y/n] '; read -r ans </dev/tty || ans=n
   case "${ans:-y}" in y|Y|yes) ;; *) echo "aborted"; exit 1 ;; esac
 fi
+fi
 
 # --------------------------------------------------------------- download
-step "Downloading to $DIR"
+if [ "$FETCHED" = 0 ]; then
+step "Downloading $REF to $DIR"
 if [ -d "$DIR/.git" ]; then
-  run git -C "$DIR" pull --ff-only --quiet
-elif command -v git >/dev/null; then
-  [ -e "$DIR" ] && die "$DIR exists and is not a git checkout; move it away or use --dir="
+  FROM=$(git -C "$DIR" rev-parse HEAD)
+  if [ -n "$(git -C "$DIR" status --porcelain --untracked-files=no)" ]; then
+    patch="$DIR.local-changes-$(date +%Y%m%d-%H%M%S).patch"
+    run sh -c "git -C '$DIR' diff HEAD > '$patch'"
+    warn "local edits in $DIR were saved to $patch and will be replaced"
+  fi
+  # Fetch exactly the wanted ref; works on shallow clones and after force-pushes.
+  if git ls-remote --exit-code --tags --refs "$REPO" "refs/tags/$REF" >/dev/null 2>&1; then
+    run git -C "$DIR" fetch --quiet --depth 1 --force origin "refs/tags/$REF:refs/tags/$REF"
+  else
+    run git -C "$DIR" fetch --quiet --depth 1 --force origin "$REF"
+  fi
+  run git -C "$DIR" -c advice.detachedHead=false checkout --quiet --force FETCH_HEAD
+elif [ -e "$DIR" ] && [ ! -f "$DIR/server.py" ]; then
+  die "$DIR exists and is not a hypr-computer install; move it away or use --dir="
+elif command -v git >/dev/null && [ ! -e "$DIR" ]; then
   run mkdir -p "$(dirname "$DIR")"
-  run git clone --quiet --depth 1 "$REPO" "$DIR"
-else
-  run mkdir -p "$DIR"
+  run git -c advice.detachedHead=false clone --quiet --depth 1 --branch "$REF" "$REPO" "$DIR"
+else  # no git: unpack a tarball next to the old copy, then swap them
+  kind=heads; [ "$REF" = main ] || kind=tags
   if [ "$DRY" = 0 ]; then
-    curl -fsSL "$REPO/archive/refs/heads/main.tar.gz" | tar xz -C "$DIR" --strip-components 1
+    rm -rf "$DIR.new" && mkdir -p "$DIR.new"
+    curl -fsSL "$REPO/archive/refs/$kind/$REF.tar.gz" | tar xz -C "$DIR.new" --strip-components 1
+    rm -rf "$DIR.prev"; [ -e "$DIR" ] && mv "$DIR" "$DIR.prev"; mv "$DIR.new" "$DIR"
+    [ -e "$DIR.prev" ] && FROM=prev-dir
   fi
 fi
-info "ok"
+if [ "$DRY" = 0 ] && [ -n "$FROM" ] && [ "$FROM" != prev-dir ] && [ "$(git -C "$DIR" rev-parse HEAD)" = "$FROM" ]; then
+  info "already up to date ($(version_of "$DIR"))"
+  FROM=""
+elif [ "$DRY" = 0 ]; then
+  info "now at $(version_of "$DIR")"
+  # Finish with the installer that was just downloaded, which may know more steps.
+  [ -n "$FROM" ] && exec bash "$DIR/install.sh" "${ARGS[@]}" --from="$FROM"
+fi
+fi
 
 # ----------------------------------------------------------------- system
 if [ "$SYSTEM" = 1 ]; then
@@ -114,8 +160,24 @@ command -v uv >/dev/null || [ "$DRY" = 1 ] || die "uv is not on PATH; install it
 step "Self-check"
 if [ "$DRY" = 1 ]; then info "[dry-run] uv run --quiet --script $DIR/server.py --check"
 elif ! uv run --quiet --script "$DIR/server.py" --check | sed 's/^/    /'; then
+  if [ "$FROM" = prev-dir ]; then
+    rm -rf "$DIR.failed"; mv "$DIR" "$DIR.failed"; mv "$DIR.prev" "$DIR"
+    die "the new version failed its self-check, so the previous one was restored. See the FAIL lines above."
+  elif [ -n "$FROM" ]; then
+    git -C "$DIR" -c advice.detachedHead=false checkout --quiet --force "$FROM"
+    die "the new version failed its self-check, so $(version_of "$DIR") was restored. See the FAIL lines above."
+  fi
   die "self-check failed. Fix the FAIL lines above (often: log out and back in), then re-run."
 fi
+[ "$FROM" = prev-dir ] && rm -rf "$DIR.prev"
+
+# ---------------------------------------------------------------- command
+step "The hypr-computer command"
+BIN="$HOME/.local/bin"
+run mkdir -p "$BIN"
+run ln -sfn "$DIR/bin/hypr-computer" "$BIN/hypr-computer"
+info "$BIN/hypr-computer (update, check, stop, resume, version)"
+case ":$PATH:" in *":$BIN:"*) ;; *) warn "$BIN is not on your PATH; add it to use the command" ;; esac
 
 # ---------------------------------------------------------------- clients
 SERVER="$DIR/server.py"
@@ -212,9 +274,23 @@ if [ -n "$CLIENTS" ]; then
   done
 fi
 
+# Claude Code plugin installs keep their own copy; bring it up to date too.
+if installed claude && claude plugin list 2>/dev/null | grep -q "hypr-computer@hypr-computer"; then
+  step "Claude Code plugin"
+  run claude plugin marketplace update hypr-computer >/dev/null
+  run claude plugin update hypr-computer@hypr-computer | sed 's/^/    /'
+fi
+
 # ------------------------------------------------------------------- done
 step "Done"
-info "Installed in $DIR (update later by re-running this installer)."
+info "hypr-computer $(version_of "$DIR") in $DIR. Update any time with: hypr-computer update"
 [ -n "$CLIENTS" ] && info "Restart ${CLIENTS//,/, } to load the hypr-computer tools."
+if [ -n "$FROM" ] && pgrep -f "$DIR/server\.py" >/dev/null 2>&1; then
+  warn "Agents that are open now still run the old version: restart them to load $(version_of "$DIR")."
+fi
 [ "${#FAILED[@]}" -gt 0 ] && warn "Needs manual setup: ${FAILED[*]}"
 info "Other clients (VS Code, Zed, Goose, Cline, Windsurf): $REPO#client-configuration"
+}
+
+main "$@"
+exit

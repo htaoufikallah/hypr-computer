@@ -59,7 +59,9 @@ SESSION_ENV = ("export XDG_RUNTIME_DIR=/run/user/$(id -u); "
 
 
 def mcp_config(host: str, server: str, name: str, command: str | None) -> str:
-    run = SESSION_ENV + "exec " + (command or f"uv run --quiet --script {server}")
+    # open_url uses the throwaway bench profile, never the user's browser.
+    browser = "chromium --user-data-dir=/tmp/hcb/chrome --no-first-run --no-default-browser-check"
+    run = SESSION_ENV + f"export HYPR_COMPUTER_BROWSER={shlex.quote(browser)}; exec " + (command or f"uv run --quiet --script {server}")
     if host == "local":
         entry = {"command": "bash", "args": ["-lc", run]}
     else:

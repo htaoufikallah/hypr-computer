@@ -56,7 +56,7 @@ It shows what it will do and asks before starting. Then it:
 4. Registers the server with each supported agent you've used (it checks for the
    agent's config folder): Claude Code, Codex, opencode, Gemini CLI and Cursor.
 
-Then restart your agent. To update later, run the same command again.
+Then restart your agent. To update later, run `hypr-computer update` (see [Updating](#updating)).
 
 Options go after `bash -s --`, for example
 `curl -fsSL malik-na.github.io/hypr-computer | bash -s -- --clients=claude --yes`:
@@ -108,8 +108,23 @@ You are probably an agent asked to set up computer use on this machine.
    `list_windows` and `screenshot`. If you can see the screenshot, setup is
    complete. Don't click or type during the test unless the user asks.
 
-To re-check at any time without changing anything:
-`uv run --quiet --script ~/.local/share/hypr-computer/server.py --check`
+To re-check at any time without changing anything: `hypr-computer check`
+
+### Updating
+
+```bash
+hypr-computer update
+```
+
+Then restart your agents: an agent keeps running the version it started with. If you forget, hypr-computer tells the agent once that a newer version is installed, and the agent passes that on to you.
+
+- **Releases only.** It installs the newest tagged release, never untested work in progress.
+- **Rolls back on failure.** If the new version fails its self-check, the previous one is restored.
+- **Keeps your edits.** Local changes to the install are saved to a `.patch` file next to it first.
+- **Updates the Claude Code plugin too**, if it's installed.
+- **No sudo** unless a release needs a new package.
+
+On v0.5 or older there's no `hypr-computer` command yet. Run the install one-liner again once and it will add it.
 
 ---
 
@@ -128,6 +143,7 @@ To re-check at any time without changing anything:
 | `zoom` | Returns a region of the screen at full resolution, for reading small text |
 | `focus_window` | Focuses a window by class or title, switching workspace if needed |
 | `launch_app` | Starts an installed desktop app by name, suggesting close matches if the name isn't found |
+| `open_url` | Opens a page in the default browser, optionally in a **private/incognito window**, waits for it to load and returns a screenshot, all in one call |
 | `cursor_position` | Returns the pointer position |
 | `list_windows` | Lists windows with workspace, class, title and bounding box |
 
@@ -143,10 +159,11 @@ All settings are optional environment variables for the server:
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `HYPR_COMPUTER_TOOLS` | `all` | `core` leaves out `batch`, `zoom`, `focus_window` and `launch_app`, so fewer tool tokens are spent each turn |
+| `HYPR_COMPUTER_TOOLS` | `all` | `core` leaves out `batch`, `zoom`, `focus_window`, `launch_app` and `open_url`, so fewer tool tokens are spent each turn |
 | `HYPR_COMPUTER_MAX_EDGE` | `1456` | The screenshot's long edge in pixels. Lower it for models that downscale smaller images |
 | `HYPR_COMPUTER_SETTLE_MS` | `500` | How long a screenshot taken right after an action waits for animations |
 | `HYPR_COMPUTER_DENY` | password managers | A regex of window classes and titles the agent may not touch. Empty turns the deny-list off |
+| `HYPR_COMPUTER_BROWSER` | default browser | The browser command `open_url` runs, e.g. `firefox` or `chromium --user-data-dir=/tmp/profile` |
 | `HYPR_COMPUTER_RECORD_DIR` | off | Records each step and screenshot to this local folder, to review what the agent did |
 
 ## Client requirements

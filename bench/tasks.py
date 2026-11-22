@@ -156,6 +156,27 @@ document.title='RESULT|'+v('name').value+'|'+v('email').value+'|'+v('plan').valu
         check=f"[ \"$(tr -d '[:space:]' < $B/out/code.txt 2>/dev/null)\" = '{secret}' ]",
         windows=2,
     ))
+    # 6. Private window + cookie banner (from user feedback: slow with Cursor).
+    # The normal profile gets a localStorage flag first; a private window can't see it,
+    # so the page itself reports which kind of window it was opened in.
+    pick = rng.choice(["Accept all", "Reject all"])
+    cookie = page(
+        "<h1>Daily News</h1>" + "<p>Lorem ipsum dolor sit amet, consectetur adipiscing elit.</p>" * 12 +
+        """<div id=banner style="position:fixed;left:0;right:0;bottom:0;background:#222;color:#fff;padding:24px">
+We use cookies to improve your experience.
+<button onclick="done('Accept all')">Accept all</button> <button onclick="done('Reject all')">Reject all</button>
+<button onclick="alert('Settings')">Settings</button></div>""",
+        "function done(v){document.getElementById('banner').remove();"
+        "document.title='COOKIES|'+v+'|'+(localStorage.getItem('hcb')?'normal':'private')}")
+    mark = page("<p>Start page</p>", "localStorage.setItem('hcb','1');document.title='Start page'")
+    tasks.append(Task(
+        id="private-cookie",
+        prompt=(f"Open file:///tmp/hcb/www/cookie.html in a private (incognito) Chromium window and "
+                f"answer its cookie banner with \"{pick}\"."),
+        setup=(heredoc("$B/www/cookie.html", cookie) + heredoc("$B/www/start.html", mark)
+               + chromium("file:///tmp/hcb/www/start.html")),
+        check=f"{TITLE_OF_BENCH_CHROMIUM} | grep -qF 'COOKIES|{pick}|private'",
+    ))
     return tasks
 
 

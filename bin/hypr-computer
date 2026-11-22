@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# hypr-computer: manage the local install. Linked into ~/.local/bin by the installer.
+set -euo pipefail
+
+DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+server() { exec uv run --quiet --script "$DIR/server.py" "$@"; }
+
+case "${1:-help}" in
+  update)  shift; exec bash "$DIR/install.sh" --update --dir="$DIR" "$@" ;;
+  check)   server --check ;;
+  version) server --version ;;
+  stop)    server --stop ;;
+  resume)  server --resume ;;
+  *)
+    cat <<EOF
+usage: hypr-computer <command>
+
+  update    install the latest release (rolls back if it fails its self-check)
+  check     read-only self-check
+  version   print the installed version
+  stop      block every action of every running agent at once
+  resume    allow actions again
+
+Installed in $DIR
+EOF
+    [ "${1:-help}" = help ] || [ "${1:-}" = -h ] || [ "${1:-}" = --help ] || exit 2 ;;
+esac

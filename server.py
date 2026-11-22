@@ -17,6 +17,7 @@ import glob
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -411,6 +412,121 @@ def desktop_entries() -> dict[str, str]:
     return apps
 
 
+def desktop_file(did: str) -> str | None:
+    """Path of the desktop file with this id, honouring XDG precedence."""
+    dirs = [os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))]
+    dirs += os.environ.get("XDG_DATA_DIRS", "/usr/local/share:/usr/share").split(":")
+    for d in dirs:
+        path = os.path.join(d, "applications", did + ".desktop")
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def desktop_execs(path: str) -> dict[str, list[str]]:
+    """Exec commands of a desktop file: {"": main, "<action name>": ...}, field codes removed."""
+    out: dict[str, list[str]] = {}
+    section, name = None, ""
+    for line in open(path, errors="replace"):
+        line = line.strip()
+        if line.startswith("["):
+            section = line
+            name = "" if line == "[Desktop Entry]" else line[len("[Desktop Action "):-1].lower()
+        elif line.startswith("Name=") and section and section != "[Desktop Entry]":
+            name = name + " " + line[5:].lower()
+        elif line.startswith("Exec=") and section:
+            out[name] = [a for a in shlex.split(line[5:]) if not (len(a) == 2 and a[0] == "%")]
+    return out
+
+
+PRIVATE_FLAGS = {"firefox": "--private-window", "librewolf": "--private-window", "zen": "--private-window",
+                 "floorp": "--private-window", "microsoft-edge": "--inprivate"}  # Chromium family: --incognito
+
+
+def browser_command(private: bool) -> list[str]:
+    """Command that opens a URL (appended) in the default browser, optionally in a private window.
+
+    HYPR_COMPUTER_BROWSER overrides the browser (e.g. "chromium --user-data-dir=/tmp/x")."""
+    override = os.environ.get("HYPR_COMPUTER_BROWSER")
+    if override:
+        cmd = shlex.split(override)
+    else:
+        did = run("xdg-mime", "query", "default", "x-scheme-handler/https").strip().removesuffix(".desktop")
+        path = desktop_file(did) if did else None
+        if not path:
+            raise RuntimeError("no default web browser is set (xdg-settings set default-web-browser ...)")
+        execs = desktop_execs(path)
+        if private:
+            for name, action in execs.items():
+                if name and ("private" in name or "incognito" in name or "inprivate" in name):
+                    return action  # the browser's own "New private window" action
+        if not execs.get(""):
+            raise RuntimeError(f"{path} has no Exec line")
+        cmd = execs[""]
+    if private:
+        exe = os.path.basename(cmd[0])
+        cmd = cmd + [next((f for k, f in PRIVATE_FLAGS.items() if k in exe), "--incognito")]
+    return cmd
+
+
+BLANK_TITLES = re.compile(r"(?i)^(|new tab|new private tab|new incognito tab|about:blank|loading.*)"
+                          r"( [-—] .*)?$")
+
+
+def active_window_key() -> tuple[str, str]:
+    try:
+        w = hypr_json("activewindow")
+    except (RuntimeError, ValueError):
+        return "", ""
+    return w.get("address", ""), w.get("title", "")
+
+
+def page_ready(before: tuple[str, str], now: tuple[str, str]) -> bool:
+    """A different window or title than before, and not a blank / loading tab."""
+    return now != before and bool(now[0]) and not BLANK_TITLES.match(now[1].split(" - ")[0].strip())
+
+
+def wait_for_page(before: tuple[str, str], timeout: float) -> float:
+    """Poll the focused window until a page has loaded into it; returns seconds waited."""
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout:
+        if page_ready(before, active_window_key()):
+            break
+        time.sleep(0.1)
+    return time.monotonic() - t0
+
+
+# ------------------------------------------------------------------- versions
+
+PLUGIN_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".claude-plugin", "plugin.json")
+
+
+def installed_version() -> str:
+    """Version of the code on disk now (it changes when the user updates)."""
+    try:
+        with open(PLUGIN_JSON) as f:
+            return json.load(f)["version"]
+    except (OSError, ValueError, KeyError):
+        return "unknown"
+
+
+VERSION = installed_version()  # the version this process is running
+_update_noted = False
+
+
+def update_note() -> str:
+    """Once per session: tell the agent this server is older than what's installed."""
+    global _update_noted
+    if _update_noted:
+        return ""
+    disk = installed_version()
+    if disk in (VERSION, "unknown"):
+        return ""
+    _update_noted = True
+    return (f"\n(Note: hypr-computer {disk} is installed, but this session still runs {VERSION}. "
+            "Tell the user to restart this agent to load the update.)")
+
+
 # ------------------------------------------------------------------- recording
 
 
@@ -437,17 +553,30 @@ def record(tool: str, args: dict, text: str, image: bytes | None = None) -> None
 # ----------------------------------------------------------------------- tools
 
 
+CORE_INSTRUCTIONS = """\
+Controls a Linux (Hyprland) desktop. Every turn is slow, so use as few calls as possible:
+- Coordinates are pixels in the latest screenshot.
+- Pass screenshot=true on click/scroll/type_text/key instead of calling screenshot afterwards.
+- Use keyboard shortcuts where they exist (ctrl+l address bar, ctrl+t new tab, Return)."""
+
+INSTRUCTIONS = CORE_INSTRUCTIONS + """
+- Web pages: open_url(url, private=true for incognito) opens the page and returns a screenshot.
+- Apps: focus_window or launch_app, not hunting for them in screenshots.
+- When you know the next few actions (click a field, type, press Return), send them in one batch."""
+
+
 def build_server():
     from mcp.server.fastmcp import FastMCP, Image
 
-    mcp = FastMCP("hypr-computer")
     core_only = os.environ.get("HYPR_COMPUTER_TOOLS", "all").strip().lower() == "core"
+    mcp = FastMCP("hypr-computer", instructions=CORE_INSTRUCTIONS if core_only else INSTRUCTIONS)
 
     def extra_tool():
         """Register a non-core tool unless HYPR_COMPUTER_TOOLS=core (fewer tool tokens)."""
         return (lambda fn: fn) if core_only else mcp.tool()
 
     def reply(tool: str, args: dict, text: str, with_shot: bool = False):
+        text += update_note()
         if not with_shot:
             record(tool, args, text)
             return text
@@ -460,7 +589,7 @@ def build_server():
         """Capture all monitors. Coordinates for every other tool are pixels in this image."""
         data, info = capture()
         record("screenshot", {}, info, data)
-        return [Image(data=data, format="jpeg"), info]
+        return [Image(data=data, format="jpeg"), info + update_note()]
 
     @mcp.tool()
     def click(x: float, y: float, button: str = "left", count: int = 1, screenshot: bool = False):
@@ -561,6 +690,24 @@ def build_server():
         mark_input()
         return reply("launch_app", {"name": name}, f"launched {did}; take a screenshot once it has opened")
 
+    @extra_tool()
+    def open_url(url: str, private: bool = False, wait_ms: int = 8000):
+        """Open a web page in the default browser, in one call; private=true uses a private /
+        incognito window. Waits (up to wait_ms) for the page's window, then returns a
+        screenshot. Much faster than launching the browser and typing into the address bar."""
+        if not re.match(r"(?i)^(https?|file)://", url):
+            if "://" in url or url.lower().startswith(("javascript:", "data:")):
+                raise ValueError("only http(s) and file URLs can be opened")
+            url = "https://" + url
+        guard()
+        cmd = " ".join(shlex.quote(a) for a in browser_command(private) + [url])
+        before = active_window_key()
+        run("hyprctl", "dispatch", "hl.dsp.exec_cmd(" + json.dumps(cmd, ensure_ascii=False) + ")")
+        wait_for_page(before, max(0, min(15000, int(wait_ms))) / 1000)
+        mark_input()  # plus the settle delay before the screenshot, for rendering
+        return reply("open_url", {"url": url, "private": private},
+                     f"opened {url}" + (" in a private window" if private else ""), True)
+
     @mcp.tool()
     def cursor_position() -> str:
         """Current pointer position, in screenshot pixels."""
@@ -629,6 +776,7 @@ def self_check() -> int:
     check("not stopped", lambda: fail(f"{stop_file()} exists; delete it to allow actions")
           if os.path.exists(stop_file()) else "ok")
 
+    print(f"hypr-computer {VERSION} ({os.path.dirname(os.path.abspath(__file__))})")
     for ok, name, detail in results:
         print(f"{'PASS' if ok else 'FAIL'}  {name}: {detail}")
     failed = sum(not ok for ok, _, _ in results)
@@ -637,6 +785,9 @@ def self_check() -> int:
 
 
 if __name__ == "__main__":
+    if "--version" in sys.argv[1:]:
+        print(VERSION)
+        sys.exit(0)
     if "--check" in sys.argv[1:]:
         sys.exit(self_check())
     if "--stop" in sys.argv[1:]:
