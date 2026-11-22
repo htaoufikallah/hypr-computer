@@ -212,7 +212,7 @@ if exists:
     try:
         data = json.load(open(path))
     except json.JSONDecodeError:
-        sys.exit(f"{path} is not plain JSON (comments?); add the README snippet by hand")
+        sys.exit(f"{path} is not plain JSON (comments?); add the snippet from docs/clients.md by hand")
 if kind == "opencode":
     data.setdefault("$schema", "https://opencode.ai/config.json")
     servers = data.setdefault("mcp", {}).setdefault("servers", {})
@@ -250,12 +250,12 @@ register() {
     opencode)
       local oc="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
       if [ -f "$oc/opencode.jsonc" ] && [ ! -f "$oc/opencode.json" ]; then
-        warn "$oc/opencode.jsonc may contain comments; add the README snippet by hand"; return 1
+        warn "$oc/opencode.jsonc may contain comments; add the snippet from docs/clients.md by hand"; return 1
       fi
       write_config opencode "$oc/opencode.json" ;;
     gemini) write_config mcpServers "$HOME/.gemini/settings.json" ;;
     cursor) write_config cursor "$HOME/.cursor/mcp.json" ;;
-    *) warn "unknown client '$1'; see the README for its config" ;;
+    *) warn "unknown client '$1'; see docs/clients.md for its config" ;;
   esac
 }
 
@@ -264,7 +264,7 @@ if [ -n "$CLIENTS" ]; then
   IFS=, read -r -a list <<<"$CLIENTS"
   for c in "${list[@]}"; do
     step "Registering with $c"
-    register "$c" || { warn "could not register with $c; see the README for a manual snippet"; FAILED+=("$c"); }
+    register "$c" || { warn "could not register with $c; see docs/clients.md for a manual snippet"; FAILED+=("$c"); }
   done
 fi
 
@@ -282,7 +282,7 @@ if [ -n "$FROM" ] && pgrep -f "$DIR/server\.py" >/dev/null 2>&1; then
   warn "Agents that are open now still run the old version: restart them to load $(version_of "$DIR")."
 fi
 [ "${#FAILED[@]}" -gt 0 ] && warn "Needs manual setup: ${FAILED[*]}"
-info "Other clients (VS Code, Zed, Goose, Cline, Windsurf): $REPO#client-configuration"
+info "Other clients (VS Code, Zed, Goose, Cline, Windsurf): $REPO/blob/main/docs/clients.md"
 }
 
 main "$@"
