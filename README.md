@@ -12,7 +12,7 @@ It was built and tested on Omarchy running on Asahi Linux on an Apple M3 Max.
 Run this one command on the Linux machine:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/malik-na/hypr-computer/main/install.sh | bash
+curl -fsSL https://malik-na.github.io/hypr-computer/install.sh | bash
 ```
 
 It shows what it will do and asks before starting. Then it:
@@ -62,7 +62,7 @@ You are probably an agent asked to set up computer use on this machine.
    `codex`, `opencode`, `gemini` or `cursor`. Leave out `--clients` to register
    every agent whose config folder exists.
    ```bash
-   curl -fsSL https://raw.githubusercontent.com/malik-na/hypr-computer/main/install.sh | bash -s -- --yes --clients=<client>
+   curl -fsSL https://malik-na.github.io/hypr-computer/install.sh | bash -s -- --yes --clients=<client>
    ```
    If `sudo` can't prompt from your environment, ask the user to run the command
    themselves in a terminal.
