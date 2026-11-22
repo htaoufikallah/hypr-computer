@@ -118,31 +118,56 @@ fi
 SERVER="$DIR/server.py"
 CMD=(uv run --quiet --script "$SERVER")
 
-merge_json() {  # merge_json FILE  -> adds mcpServers.hypr-computer, keeps a backup
-  local file="$1"
+# Writes the hypr-computer entry straight into a client's config file, so the
+# client never has to run (a mise "lazy" agent would download itself if it did).
+# write_config KIND FILE: KIND is mcpServers | cursor | opencode | codex.
+write_config() {
+  local kind="$1" file="$2"
   if [ "$DRY" = 1 ]; then info "[dry-run] add hypr-computer to $file"; return; fi
   mkdir -p "$(dirname "$file")"
-  python3 - "$file" "$SERVER" <<'PY'
+  python3 - "$kind" "$file" "$SERVER" <<'PY'
 import json, os, shutil, sys
-path, server = sys.argv[1], sys.argv[2]
+kind, path, server = sys.argv[1:4]
+args = ["run", "--quiet", "--script", server]
+exists = os.path.exists(path) and os.path.getsize(path) > 0
+
+def save(text):
+    if exists:
+        shutil.copy(path, path + ".bak-hypr-computer")
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(text)
+    os.replace(tmp, path)
+    print(f"    added to {path}")
+
+if kind == "codex":
+    text = open(path).read() if exists else ""
+    if "[mcp_servers.hypr-computer]" in text:
+        print("    already registered"); sys.exit(0)
+    block = ("[mcp_servers.hypr-computer]\n" 'command = "uv"\n'
+             "args = " + json.dumps(args) + "\n")
+    save(text + ("\n" if text and not text.endswith("\n") else "") + ("\n" if text else "") + block)
+    sys.exit(0)
+
 data = {}
-if os.path.exists(path) and os.path.getsize(path):
+if exists:
     try:
         data = json.load(open(path))
     except json.JSONDecodeError:
         sys.exit(f"{path} is not plain JSON (comments?); add the README snippet by hand")
-    shutil.copy(path, path + ".bak-hypr-computer")
-entry = {"command": "uv", "args": ["run", "--quiet", "--script", server]}
-if path.endswith(os.path.join(".cursor", "mcp.json")):
-    entry = {"type": "stdio", **entry}
-servers = data.setdefault("mcpServers", {})
+if kind == "opencode":
+    data.setdefault("$schema", "https://opencode.ai/config.json")
+    servers = data.setdefault("mcp", {}).setdefault("servers", {})
+    entry = {"type": "local", "command": ["uv", *args]}
+else:
+    servers = data.setdefault("mcpServers", {})
+    entry = {"command": "uv", "args": args}
+    if kind == "cursor":
+        entry = {"type": "stdio", **entry}
 if servers.get("hypr-computer") == entry:
     print("    already registered"); sys.exit(0)
 servers["hypr-computer"] = entry
-tmp = path + ".tmp"
-json.dump(data, open(tmp, "w"), indent=2)
-os.replace(tmp, path)
-print(f"    added to {path}")
+save(json.dumps(data, indent=2) + "\n")
 PY
 }
 
@@ -162,17 +187,15 @@ register() {
       installed claude || { warn "claude is not installed; skipped (install it, then re-run this command)"; return 0; }
       if claude mcp list 2>/dev/null | grep -q "hypr-computer"; then info "already registered"
       else run claude mcp add --transport stdio --scope user hypr-computer -- "${CMD[@]}"; fi ;;
-    codex)
-      installed codex || { warn "codex is not installed; skipped (install it, then re-run this command)"; return 0; }
-      if grep -qs '^\[mcp_servers\.hypr-computer\]' "${CODEX_HOME:-$HOME/.codex}/config.toml"; then info "already registered"
-      else run codex mcp add hypr-computer -- "${CMD[@]}"; fi ;;
+    codex) write_config codex "${CODEX_HOME:-$HOME/.codex}/config.toml" ;;
     opencode)
-      installed opencode || { warn "opencode is not installed; skipped (install it, then re-run this command)"; return 0; }
-      if grep -qs '"hypr-computer"' "${XDG_CONFIG_HOME:-$HOME/.config}"/opencode/opencode.json{,c}
-      then info "already registered"
-      else run opencode mcp add hypr-computer --global -- "${CMD[@]}"; fi ;;
-    gemini) merge_json "$HOME/.gemini/settings.json" ;;
-    cursor) merge_json "$HOME/.cursor/mcp.json" ;;
+      local oc="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
+      if [ -f "$oc/opencode.jsonc" ] && [ ! -f "$oc/opencode.json" ]; then
+        warn "$oc/opencode.jsonc may contain comments; add the README snippet by hand"; return 1
+      fi
+      write_config opencode "$oc/opencode.json" ;;
+    gemini) write_config mcpServers "$HOME/.gemini/settings.json" ;;
+    cursor) write_config cursor "$HOME/.cursor/mcp.json" ;;
     *) warn "unknown client '$1'; see the README for its config" ;;
   esac
 }
