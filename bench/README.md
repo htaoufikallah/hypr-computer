@@ -30,7 +30,7 @@ identical tasks.
 # against the server installed on the target
 python3 bench/run.py --host <ssh-host> --label baseline
 
-# against this working copy (copies server.py and wl_input.py to the target)
+# against this working copy (copies the server's files to the target)
 python3 bench/run.py --host <ssh-host> --sync . --label my-change --reps 3
 
 # check setup and teardown only, without an agent
