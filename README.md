@@ -345,6 +345,29 @@ uv run --quiet --script server.py --check
 claude plugin validate . --strict
 ```
 
+## Acknowledgements
+
+hypr-computer is a thin layer over these projects, and does nothing without them:
+
+| Project | Used for | License |
+| --- | --- | --- |
+| [Hyprland](https://github.com/hyprwm/Hyprland) (`hyprctl`) | Pointer placement, monitor and window info, input devices | BSD-3-Clause |
+| [grim](https://gitlab.freedesktop.org/emersion/grim) | Screenshots | MIT |
+| [ydotool](https://github.com/ReimuNotMoe/ydotool) | Clicks, scrolling, shortcuts and ASCII typing through uinput, and its `ydotoold` user service | AGPL-3.0 |
+| [wtype](https://github.com/atx/wtype) | Typing non-ASCII text through the Wayland virtual keyboard protocol | MIT |
+| [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk) (`mcp`) | The MCP server (FastMCP) | MIT |
+| [uv](https://github.com/astral-sh/uv) | Running the server and installing its Python dependencies | MIT or Apache-2.0 |
+| [pytest](https://github.com/pytest-dev/pytest) | Tests (development only) | MIT |
+
+None of these are bundled or modified in this repo. The system tools are
+installed from your distribution's packages and run as separate programs. The
+Python packages are installed by `uv` when the server first starts. Each one
+stays under its own license.
+
+The packages were tested at Hyprland 0.56.2, grim 1.5.0, ydotool 1.0.4,
+wtype 0.4, mcp 1.30.0, uv 0.13.1 and pytest 9.2.0. The workflow was developed
+on [Omarchy](https://omarchy.org).
+
 ## License
 
 MIT
