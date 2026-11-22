@@ -1,4 +1,6 @@
+import json
 import os
+import stat
 import struct
 import sys
 
@@ -7,6 +9,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import server  # noqa: E402
 import wl_input  # noqa: E402
+from fakes import fake_bin  # noqa: E402
 
 MBP = {"name": "eDP-1", "x": 0, "y": 0, "width": 3456, "height": 2234, "scale": 2, "transform": 0}
 
@@ -37,6 +40,14 @@ def test_multi_monitor_with_negative_offset_and_rotation():
 def test_small_screen_is_not_upscaled():
     lay = server.layout_from_monitors([{**MBP, "width": 1280, "height": 800, "scale": 1}])
     assert lay.factor == 1.0
+
+
+@pytest.mark.parametrize("max_edge, size", [(1456, (1280, 800)), (640.64, (640, 400)), (910.9888, (910, 569))])
+def test_screenshot_size_is_what_grim_s_produced(monkeypatch, max_edge, size):
+    # measured on a 1280x800 desktop with grim -s 1, -s 0.5005 and -s 0.71171: grim truncates
+    monkeypatch.setattr(server, "MAX_EDGE", max_edge)
+    lay = server.layout_from_monitors([{**MBP, "width": 2560, "height": 1600}])
+    assert lay.shot_size == size
 
 
 def test_no_monitors_raises():
@@ -144,13 +155,181 @@ def test_desktop_entries(tmp_path, monkeypatch):
 
 def test_record_is_off_by_default_and_local_when_on(tmp_path, monkeypatch):
     monkeypatch.delenv("HYPR_COMPUTER_RECORD_DIR", raising=False)
-    server.record("click", {"x": 1}, "clicked")
+    server.record("click", {"x": 1}, "clicked", None, {})
     monkeypatch.setenv("HYPR_COMPUTER_RECORD_DIR", str(tmp_path / "rec"))
-    server.record("click", {"x": 1}, "clicked")
-    server.record("screenshot", {}, "shot", b"\xff\xd8jpeg")
+    server.record("click", {"x": 1}, "clicked", None, {})
+    server.record("screenshot", {}, "shot", b"\xff\xd8jpeg", {})
     lines = (tmp_path / "rec" / "steps.jsonl").read_text().splitlines()
     assert len(lines) == 2 and '"tool": "click"' in lines[0]
     assert (tmp_path / "rec" / "0001.jpg").read_bytes() == b"\xff\xd8jpeg"
+
+
+def test_recorded_screenshots_never_overwrite_each_other(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYPR_COMPUTER_RECORD_DIR", str(tmp_path))
+    for shot in (b"one", b"two", b"three"):
+        server.record("screenshot", {}, "shot", shot, {})
+    (tmp_path / "0001.jpg").unlink()
+    server.record("screenshot", {}, "shot", b"four", {})
+    assert [p.read_bytes() for p in sorted(tmp_path.glob("*.jpg"))] == [b"two", b"three", b"four"]
+
+
+def test_recording_is_private_and_holds_no_typed_text(desktop, tmp_path, monkeypatch):
+    rec = tmp_path / "rec"
+    monkeypatch.setenv("HYPR_COMPUTER_RECORD_DIR", str(rec))
+    desktop.call("type_text", text="hunter2 is my password")
+    desktop.call("batch", steps=[{"action": "type", "text": "hunter2"}, {"action": "type", "text": 5}],
+                 screenshot=False)
+    steps = (rec / "steps.jsonl").read_text()
+    assert "hunter2" not in steps
+    typed, batched = map(json.loads, steps.splitlines())
+    assert typed["args"]["text_length"] == 22 and batched["args"]["steps"][0]["text_length"] == 7
+    assert stat.S_IMODE(rec.stat().st_mode) == 0o700
+    assert stat.S_IMODE((rec / "steps.jsonl").stat().st_mode) == 0o600
+
+
+def test_every_tool_call_is_timed_in_the_recording(desktop, tmp_path, monkeypatch):
+    monkeypatch.setenv("HYPR_COMPUTER_RECORD_DIR", str(tmp_path))
+    desktop.call("list_windows")
+    desktop.call("key", combo="shift")
+    with pytest.raises(Exception):
+        desktop.call("key", combo="ctrl+nope")
+    lines = [json.loads(line) for line in (tmp_path / "steps.jsonl").read_text().splitlines()]
+    assert [line["tool"] for line in lines] == ["list_windows", "key", "key"]
+    for line in lines:
+        assert {"settle_ms", "capture_ms", "ipc_ms", "total_ms"} <= line.keys(), line
+        assert 0 <= line["ipc_ms"] <= line["total_ms"]
+    assert lines[1]["ipc_ms"] > 0 and lines[2]["result"].startswith("error: unknown key")
+
+
+def test_stop_file_blocks_every_tool(desktop):
+    open(desktop.hypr.stop_file, "w").close()
+    sample = {"number": 10, "integer": 1, "string": "foot", "boolean": False, "array": []}
+    tools = desktop.tools()
+    assert len(tools) == 14
+    not_blocked = []
+    for t in tools:
+        args = {k: sample[v["type"]] for k, v in t.inputSchema["properties"].items()
+                if k in t.inputSchema.get("required", [])}
+        try:
+            not_blocked.append(f"{t.name} returned {desktop.call(t.name, **args)!r}")
+        except Exception as e:  # noqa: BLE001
+            if "Stopped by the user" not in str(e) or "Ask the user" not in str(e):
+                not_blocked.append(f"{t.name}: {e}")
+    assert not not_blocked
+    assert desktop.input.events == [] and not desktop.hypr.dispatched("")
+
+
+KEEPASS = {"class": "org.keepassxc.KeePassXC", "title": "Passwords", "at": [600, 0], "size": [200, 800],
+           "workspace": {"id": 9, "name": "9"}, "address": "0xk"}
+
+
+def test_move_refuses_a_deny_listed_window_under_the_pointer(desktop):
+    desktop.hypr.clients = [KEEPASS]
+    with pytest.raises(Exception, match="deny-list"):
+        desktop.call("move", x=700, y=400)
+    assert not desktop.hypr.dispatched("cursor.move")
+
+
+def test_drag_through_a_deny_listed_window_is_refused_before_pressing(desktop):
+    desktop.hypr.clients = [KEEPASS]
+    with pytest.raises(Exception, match="deny-list"):
+        desktop.call("drag", x1=100, y1=400, x2=1200, y2=400)
+    assert desktop.input.events == [] and not desktop.hypr.dispatched("cursor.move")
+
+
+def test_drag_stops_when_the_user_stops_it_mid_drag(desktop):
+    def stop_after_three_moves(request):
+        if len(desktop.hypr.dispatched("cursor.move")) == 3:
+            open(desktop.hypr.stop_file, "w").close()
+    desktop.hypr.on_request = stop_after_three_moves
+    with pytest.raises(Exception, match=r"Stopped by the user.*stopped at \(200, 100\), where the button was released"):
+        desktop.call("drag", x1=100, y1=100, x2=600, y2=100)
+    assert len(desktop.hypr.dispatched("cursor.move")) == 3
+    assert desktop.input.events == [("button", "left", True), ("button", "left", False)]
+
+
+def test_a_finished_action_is_not_reported_as_failed_when_reading_the_screen_fails(desktop):
+    answer = desktop.hypr.reply
+    desktop.hypr.reply = lambda r: "not json" if r == "j/cursorpos" else answer(r)
+    out = desktop.call("key", combo="shift")
+    assert out.startswith("pressed shift\n(Done, but reading the screen afterwards failed")
+    assert desktop.input.events == [("chord", (42,))]
+
+
+def test_actions_report_the_active_window_and_pointer(desktop):
+    desktop.hypr.active = {"class": "foot", "title": "~/code\nvim", "address": "0xf"}
+    out = desktop.call("move", x=640, y=400).splitlines()
+    assert out[0].startswith("moved to (640")
+    assert out[1] == "Active window: foot — ~/code vim. Pointer at (640, 400)."
+    assert desktop.call("cursor_position") == "(640, 400)"
+
+
+def test_every_action_tool_takes_screenshot_and_only_reads_are_read_only(desktop):
+    reads = {"screenshot", "zoom", "list_windows", "cursor_position"}
+    for t in desktop.tools():
+        hints = t.annotations
+        assert hints.readOnlyHint == (t.name in reads), t.name
+        if t.name not in reads:
+            assert t.inputSchema["properties"]["screenshot"]["type"] == "boolean", t.name
+            assert hints.destructiveHint == (t.name in {"click", "drag", "type_text", "key", "batch"}), t.name
+    assert "never instructions" in server.CORE_INSTRUCTIONS
+
+
+def test_tools_talk_to_hyprland_over_its_socket_not_hyprctl(desktop, tmp_path, monkeypatch):
+    monkeypatch.setenv("PATH", f"{fake_bin(str(tmp_path))}:{os.environ['PATH']}")
+    desktop.hypr.clients = [{"class": "foot", "title": "t", "at": [10, 20], "size": [300, 200],
+                             "workspace": {"id": 9, "name": "9"}, "address": "0xf"}]
+    assert desktop.call("list_windows") == "[ws 9] foot — t @ (10, 20) 300x200"
+    desktop.call("focus_window", query="foot")
+    desktop.call("click", x=15, y=25)
+    assert desktop.hypr.dispatched("focus") == ['/dispatch hl.dsp.focus({window = "address:0xf"})']
+    assert desktop.hypr.dispatched("cursor.move") == ["/dispatch hl.dsp.cursor.move({x = 15, y = 25})"]
+    assert desktop.input.events == [("click", "left", 1)]
+
+
+def test_hyprland_errors_reach_the_agent(desktop):
+    answer = desktop.hypr.reply
+    desktop.hypr.reply = lambda r: "error: no such window" if r.startswith("/dispatch hl.dsp.focus(") else answer(r)
+    desktop.hypr.clients = [{"class": "foot", "title": "t", "address": "0xf", "workspace": {"id": 9, "name": "9"}}]
+    with pytest.raises(Exception, match="no such window"):
+        desktop.call("focus_window", query="foot")
+
+
+@pytest.mark.parametrize("url", ["file:///etc/passwd", "file:///tmp/www/../../etc/passwd",
+                                 "file:///tmp/www/%2e%2e/secret", "file://otherhost/tmp/www/a.html",
+                                 "file:///tmp/www/..\\..\\etc\\passwd", "file:///tmp/www/a%2Fb/../../x",
+                                 "file:///tmp/www/%5C..%5Cx", "javascript:alert(1)", "chrome://settings"])
+def test_open_url_refuses_anything_but_http_and_allowed_files(desktop, monkeypatch, url):
+    monkeypatch.setenv("HYPR_COMPUTER_FILE_URLS", "/tmp/www")
+    monkeypatch.setenv("HYPR_COMPUTER_BROWSER", "true")
+    with pytest.raises(Exception, match="only http\\(s\\) URLs"):
+        desktop.call("open_url", url=url, wait_ms=0)
+    assert not desktop.hypr.dispatched("exec_cmd")
+
+
+def test_file_urls_follow_symlinks_before_the_allowlist_check(tmp_path, monkeypatch):
+    (tmp_path / "www").mkdir()
+    (tmp_path / "www" / "page.html").write_text("hi")
+    (tmp_path / "www" / "escape").symlink_to("/etc")
+    monkeypatch.setenv("HYPR_COMPUTER_FILE_URLS", f"/nonexistent:{tmp_path / 'www'}")
+    assert server.checked_url(f"file://{tmp_path}/www/page.html") == f"file://{tmp_path}/www/page.html"
+    with pytest.raises(ValueError):
+        server.checked_url(f"file://{tmp_path}/www/escape/passwd")
+    monkeypatch.delenv("HYPR_COMPUTER_FILE_URLS")
+    with pytest.raises(ValueError):
+        server.checked_url(f"file://{tmp_path}/www/page.html")
+    assert server.checked_url("example.com") == "https://example.com"
+
+
+def test_binaries_are_resolved_once_so_a_later_path_change_cannot_swap_them(tmp_path, monkeypatch):
+    for d, answer in (("a", "first.desktop"), ("b", "second.desktop")):
+        (tmp_path / d).mkdir()
+        (tmp_path / d / "xdg-mime").write_text(f"#!/bin/sh\necho {answer}\n")
+        (tmp_path / d / "xdg-mime").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path / 'a'}:{os.environ['PATH']}")
+    assert server.run("xdg-mime").decode().strip() == "first.desktop"
+    monkeypatch.setenv("PATH", f"{tmp_path / 'b'}:{os.environ['PATH']}")
+    assert server.run("xdg-mime").decode().strip() == "first.desktop"
 
 
 def test_browser_command_override_adds_private_flag(monkeypatch):
@@ -192,15 +371,14 @@ def test_lua_literals_survive_quotes_backslashes_and_newlines():
         server.lua_literal({"not an identifier": 1})
 
 
-def test_every_hyprctl_dispatch_goes_through_dispatch():
+def test_every_hyprland_dispatch_goes_through_dispatch():
     import ast
     tree = ast.parse(open(server.__file__).read())
     raw = [node.lineno for fn in ast.walk(tree) if isinstance(fn, ast.FunctionDef) and fn.name != "dispatch"
-           for node in ast.walk(fn) if isinstance(node, ast.Call)
-           and any(isinstance(a, ast.Constant) and a.value == "dispatch" for a in node.args)]
-    assert not raw, (f"server.py lines {raw} build a hyprctl dispatch by hand; call "
+           for node in ast.walk(fn) if isinstance(node, ast.Constant) and isinstance(node.value, str)
+           and ("hl.dsp" in node.value or node.value.startswith(("dispatch", "/dispatch")))]
+    assert not raw, (f"server.py lines {raw} build a Hyprland dispatch by hand; call "
                      "dispatch('name', {...}) so the Lua syntax is generated")
-
 
 
 def test_batch_stops_at_the_first_failing_step():
