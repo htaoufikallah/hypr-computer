@@ -21,7 +21,7 @@ mkdir -p "$HOME/.local/bin"
 
 release() {
   sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"$1\"/" .claude-plugin/plugin.json
-  [ "${2:-}" = broken ] && sed -i 's/REQUIRED_TOOLS = ("hyprctl"/REQUIRED_TOOLS = ("no-such-tool", "hyprctl"/' server.py
+  [ "${2:-}" = broken ] && sed -i 's/REQUIRED_TOOLS = (/REQUIRED_TOOLS = ("no-such-tool", /' server.py
   git add -A && git commit -qm "v$1" && git tag "v$1" && git push -q "$T/repo.git" HEAD:refs/heads/main "v$1"
 }
 git clone -q "$SRC" "$T/src" && cd "$T/src" && git -c advice.detachedHead=false checkout -q "$(git -C "$SRC" rev-parse HEAD)" && git config user.email e2e@test && git config user.name e2e
@@ -59,5 +59,9 @@ git revert --no-edit HEAD >/dev/null && git tag v9.9.9 && git push -q "$T/repo.g
 before=$(git -C "$inst" rev-parse HEAD)
 check "update refuses the mismatched tag" '! hypr-computer update --no-system > "$T/out" 2>&1 && grep -q "v9.9.9 is broken" "$T/out"'
 check "keeps the installed release" '[ "$(git -C "$inst" rev-parse HEAD)" = "$before" ]'
+
+echo "## first agent start, with a fresh uv cache"
+UV_CACHE_DIR="$T/uv-cache" bash "$T/src/install.sh" --no-system --dir="$T/inst2" --ref=v9.9.0 --yes --clients=none >"$T/out" 2>&1 || true
+check "the installed server starts offline" '[ "$(UV_CACHE_DIR="$T/uv-cache" UV_OFFLINE=1 uv run --quiet --script "$T/inst2/server.py" --version)" = 9.9.0 ]'
 
 [ "$fails" = 0 ] && echo "all passed" || { echo "$fails failed"; exit 1; }

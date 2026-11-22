@@ -155,6 +155,11 @@ if [ "$SYSTEM" = 1 ]; then
 fi
 command -v uv >/dev/null || [ "$DRY" = 1 ] || die "uv is not on PATH; install it and re-run with --no-system"
 
+step "Python dependencies"
+if [ "$DRY" = 1 ]; then info "[dry-run] uv sync --script $DIR/server.py"
+elif uv sync --quiet --script "$DIR/server.py"; then info "downloaded, so agents start without network access"
+else warn "uv could not download them; the self-check below tries again"; fi
+
 step "Self-check"
 if [ "$DRY" = 1 ]; then info "[dry-run] uv run --quiet --script $DIR/server.py --check"
 elif ! uv run --quiet --script "$DIR/server.py" --check | sed 's/^/    /'; then

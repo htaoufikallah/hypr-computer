@@ -3,7 +3,12 @@
 Six fixed desktop tasks, each run by Claude Code in headless mode with **only**
 the hypr-computer tools: no shell and no file access. For each task, the runner
 records whether it passed, how many turns it took, how many screenshots, input
-and output tokens, time and cost. Use it to check whether a change actually
+and output tokens, time and cost. It also splits the time: seconds per turn in
+the model (`s_per_turn`), seconds the agent waited on tools (`tool_s`), and the
+milliseconds the server itself spent (`server_ms`, summed from each step's
+timing). `server_ms` is empty for v0.6.1 and older, which don't time their steps. Run those
+with `--no-record`: while recording, their `click`, `key`, `scroll`, `move` and
+`drag` act and then report an error. Use it to check whether a change actually
 makes computer use better.
 
 | Task | What the agent must do | Checked by |

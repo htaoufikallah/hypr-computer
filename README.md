@@ -24,7 +24,7 @@ Using another agent, such as VS Code, Zed or Cline? See [Connecting your agent](
 
 | Command | What it does |
 | --- | --- |
-| `hypr-computer stop` | Stop all agents from clicking or typing, instantly |
+| `hypr-computer stop` | Stop all agents from clicking, typing or taking screenshots, instantly |
 | `hypr-computer resume` | Let them continue |
 | `hypr-computer update` | Install the latest release, then restart your agents |
 | `hypr-computer check` | Check that everything works |
