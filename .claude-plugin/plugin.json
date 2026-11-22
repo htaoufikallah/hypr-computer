@@ -1,7 +1,7 @@
 {
   "name": "hypr-computer",
   "displayName": "Hypr Computer",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Computer use for Hyprland on Linux: screenshots, clicks, typing and shortcuts through an MCP server.",
   "author": {
     "name": "Naeem Malik"

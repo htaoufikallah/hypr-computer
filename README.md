@@ -7,80 +7,79 @@ VS Code, opencode and any other client that supports local MCP servers.
 
 It was built and tested on Omarchy running on Asahi Linux on an Apple M3 Max.
 
+## Install
+
+Run this one command on the Linux machine:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/malik-na/hypr-computer/main/install.sh | bash
+```
+
+It shows what it will do and asks before starting. Then it:
+
+1. Downloads this repo to `~/.local/share/hypr-computer`.
+2. Uses `sudo` once to install `grim`, `wtype`, `ydotool` (and `uv` if it's
+   missing), let your user use `/dev/uinput`, load `uinput` at boot and enable
+   the `ydotool` user service.
+3. Runs a read-only self-check.
+4. Registers the server with every supported agent it finds: Claude Code, Codex,
+   opencode, Gemini CLI and Cursor.
+
+Then restart your agent. To update later, run the same command again.
+
+Options go after `bash -s --`, for example
+`curl -fsSL …/install.sh | bash -s -- --clients=claude --yes`:
+
+| Option | Effect |
+| --- | --- |
+| `--yes` | Don't ask for confirmation |
+| `--dry-run` | Show every step and change nothing |
+| `--clients=claude,codex` | Only register these agents (`none` to skip) |
+| `--no-system` | Skip the sudo step (already done, or not on Arch) |
+| `--dir=PATH` | Install somewhere other than `~/.local/share/hypr-computer` |
+
+Automatic system setup needs a pacman-based distro (Arch, Arch Linux ARM,
+Omarchy). On other distros, install `grim`, `wtype`, `ydotool` and `uv`, apply
+[`scripts/install-system.sh`](scripts/install-system.sh) by hand, and run the
+installer with `--no-system`.
+
+Claude Code users can also install this as a plugin instead:
+`claude plugin marketplace add malik-na/hypr-computer && claude plugin install hypr-computer@hypr-computer`.
+
 ---
 
 ## For AI agents: setup instructions
 
-You are probably an agent asked to set up computer use on this machine. Follow
-these steps in order. Each one ends with a check. Stop and report to the user
-if a check fails.
+You are probably an agent asked to set up computer use on this machine.
 
-### 1. Confirm the machine is supported
+1. **Check support.** Run `hyprctl version | head -1`. You need **Hyprland 0.55 or
+   newer**. If `hyprctl` is missing or older, stop and tell the user: other
+   compositors aren't supported. A `tty` or empty `$XDG_SESSION_TYPE` (for example
+   over SSH) is fine.
+2. **Ask the user first.** Tell them the installer will use `sudo` to install
+   packages and allow access to `/dev/uinput`, and wait for their OK.
+3. **Install.** Replace `<client>` with the agent you are running in: `claude`,
+   `codex`, `opencode`, `gemini` or `cursor`. Leave out `--clients` to register
+   every agent found.
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/malik-na/hypr-computer/main/install.sh | bash -s -- --yes --clients=<client>
+   ```
+   If `sudo` can't prompt from your environment, ask the user to run the command
+   themselves in a terminal.
+4. **Read the output.** The self-check prints one `PASS`/`FAIL` line per check
+   and ends with `hypr-computer is ready.` A failure stops the installer, and
+   each `FAIL` line names its fix. If `/dev/uinput writable` fails right after a
+   first install, the user needs to log out and back in, then re-run the command.
+5. **Other clients.** For VS Code, Zed, Goose, Cline or Windsurf, the installer
+   can't register the server. Add the matching snippet from
+   [Client configuration](#client-configuration), using the absolute path
+   `/home/<user>/.local/share/hypr-computer/server.py`.
+6. **Restart, then smoke test.** Ask the user to restart the agent. Then call
+   `list_windows` and `screenshot`. If you can see the screenshot, setup is
+   complete. Don't click or type during the test unless the user asks.
 
-```bash
-echo "$XDG_SESSION_TYPE $HYPRLAND_INSTANCE_SIGNATURE"; hyprctl version | head -1
-```
-
-You need a running **Hyprland 0.55 or newer** session. If `hyprctl` is missing,
-or the version is older, stop: this server does not support other compositors.
-It's fine for `$XDG_SESSION_TYPE` to be `tty` or empty (for example over SSH)
-as long as `hyprctl version` answers. The server finds the session on its own.
-
-You also need [`uv`](https://docs.astral.sh/uv/) on `PATH` (`command -v uv`). If
-it's missing, ask the user before installing it.
-
-### 2. Get the code
-
-```bash
-git clone https://github.com/malik-na/hypr-computer ~/.local/share/hypr-computer
-```
-
-Use exactly this path. The client configs below assume it. If the directory
-already exists, run `git -C ~/.local/share/hypr-computer pull` instead.
-
-### 3. Install system dependencies (needs sudo, so ask the user first)
-
-```bash
-~/.local/share/hypr-computer/scripts/install-system.sh
-```
-
-This targets pacman-based distros (Arch, Arch Linux ARM, Omarchy). It installs
-`grim`, `wtype` and `ydotool`. It adds a udev rule giving the logged-in user
-access to `/dev/uinput`, loads the `uinput` module now and at every boot, and
-enables the `ydotool` user service. It's safe to re-run.
-
-Tell the user it will run `sudo` before you run it. On other distros, install
-the same three packages and apply the steps in the script by hand.
-
-### 4. Verify
-
-```bash
-uv run --quiet --script ~/.local/share/hypr-computer/server.py --check
-```
-
-This only reads; it never clicks or types. Every line must say `PASS`, and the
-last line must say `hypr-computer is ready.` The exit code is 0 on success.
-Each `FAIL` line names its fix. If `/dev/uinput writable` fails right after
-step 3, the user may need to log out and back in.
-
-### 5. Register the server with the user's agent
-
-Add the server to the client you are running in, using its section in
-[Client configuration](#client-configuration). Every client runs the same
-command:
-
-```
-uv run --quiet --script /home/<user>/.local/share/hypr-computer/server.py
-```
-
-Use the absolute path (expand `~`), because many clients don't expand it.
-Then tell the user to restart the client or reload its MCP servers.
-
-### 6. Smoke test
-
-After the restart, call `list_windows` and then `screenshot`. If the screenshot
-comes back as an image you can see, setup is complete. Don't click or type
-during the smoke test unless the user asks.
+To re-check at any time without changing anything:
+`uv run --quiet --script ~/.local/share/hypr-computer/server.py --check`
 
 ---
 

@@ -12,8 +12,10 @@ if ! command -v pacman >/dev/null; then
   exit 1
 fi
 
-say "Installing grim, wtype and ydotool"
-sudo pacman -S --needed --noconfirm grim wtype ydotool
+pkgs=(grim wtype ydotool)
+command -v uv >/dev/null || pkgs+=(uv)
+say "Installing ${pkgs[*]}"
+sudo pacman -S --needed --noconfirm "${pkgs[@]}"
 
 say "Granting the active seat user access to /dev/uinput (udev uaccess)"
 echo 'KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"' |

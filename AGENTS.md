@@ -1,13 +1,13 @@
 # Agent instructions
 
 Asked to set up computer use from this repo? Follow the "For AI agents: setup
-instructions" section of README.md step by step. Ask the user before running
-anything that uses sudo, and before installing `uv`. Then register the server
-with the client you are running in, using the matching entry under "Client
-configuration".
+instructions" section of README.md. In short: confirm Hyprland 0.55 or newer,
+get the user's OK for sudo, then run
+`curl -fsSL https://raw.githubusercontent.com/malik-na/hypr-computer/main/install.sh | bash -s -- --yes --clients=<your client>`.
 
 When working on the code itself:
 
 - Run the tests: `uv run --no-project --with pytest --with 'mcp<2' pytest -q tests`
 - On a Hyprland machine, also run `uv run --quiet --script server.py --check`
+- Test the installer safely with `bash install.sh --dry-run`
 - Bump `version` in `.claude-plugin/plugin.json` for every release
