@@ -16,6 +16,10 @@ def test_each_task_records_its_server_steps_in_its_own_dir():
     os.unlink(cfg)
     assert "HYPR_COMPUTER_RECORD_DIR=/tmp/hcb/rec/run/navigate-1" in entry["args"][-1]
     assert "HYPR_COMPUTER_FILE_URLS=/tmp/hcb/www" in entry["args"][-1]
+    cfg = bench.mcp_config("m1", "/x/server.py", "hypr-computer", None, None)
+    (entry,) = json.load(open(cfg))["mcpServers"].values()
+    os.unlink(cfg)
+    assert "HYPR_COMPUTER_RECORD_DIR" not in entry["args"][-1]
 
 
 def test_server_time_is_the_sum_of_the_recorded_steps():

@@ -60,11 +60,11 @@ SESSION_ENV = ("export XDG_RUNTIME_DIR=/run/user/$(id -u); "
                "export HYPRLAND_INSTANCE_SIGNATURE=$(ls -t $XDG_RUNTIME_DIR/hypr | head -1); ")
 
 
-def mcp_config(host: str, server: str, name: str, command: str | None, record_dir: str) -> str:
+def mcp_config(host: str, server: str, name: str, command: str | None, record_dir: str | None) -> str:
     browser = f"chromium --user-data-dir={BENCH}/chrome --no-first-run --no-default-browser-check"
-    run = (SESSION_ENV + f"export HYPR_COMPUTER_BROWSER={shlex.quote(browser)} HYPR_COMPUTER_FILE_URLS={BENCH}/www "
-           f"HYPR_COMPUTER_RECORD_DIR={shlex.quote(record_dir)}; exec "
-           + (command or f"uv run --quiet --script {server}"))
+    record = f" HYPR_COMPUTER_RECORD_DIR={shlex.quote(record_dir)}" if record_dir else ""
+    run = (SESSION_ENV + f"export HYPR_COMPUTER_BROWSER={shlex.quote(browser)} HYPR_COMPUTER_FILE_URLS={BENCH}/www"
+           f"{record}; exec " + (command or f"uv run --quiet --script {server}"))
     if host == "local":
         entry = {"command": "bash", "args": ["-lc", run]}
     else:
@@ -176,6 +176,8 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--model")
     ap.add_argument("--timeout", type=int, default=900, help="seconds per task")
+    ap.add_argument("--no-record", action="store_true",
+                    help="don't record steps, so no server_ms (v0.6.1 and older fail clicks while recording)")
     ap.add_argument("--setup-only", action="store_true",
                     help="no agent: set up, run each check (it must fail), tear down")
     args = ap.parse_args()
@@ -207,14 +209,14 @@ def main() -> int:
                                   f"[print(c[\"class\"],\"|\",c[\"title\"]) for c in json.load(sys.stdin) if c[\"workspace\"][\"id\"]=={WORKSPACE}]'")
                     stats = {"windows": shot.stdout.strip().splitlines()}
                 else:
-                    record_dir = f"{BENCH}/rec-{stamp}-{args.label}-{task.id}-{rep + 1}"
+                    record_dir = None if args.no_record else f"{BENCH}/rec-{stamp}-{args.label}-{task.id}-{rep + 1}"
                     cfg = mcp_config(args.host, server, args.server_name, args.mcp_command, record_dir)
                     try:
                         stats = run_agent(task.prompt, cfg, args.server_name, system_prompt, task.max_turns,
                                           args.model, raw_dir / f"{task.id}-{rep + 1}.jsonl", args.timeout)
                     finally:
                         os.unlink(cfg)
-                    stats |= server_time(args.host, record_dir)
+                    stats |= server_time(args.host, record_dir) if record_dir else {"server_ms": None}
                 ok = remote(args.host, task.check).returncode == 0
             finally:
                 remote(args.host, TEARDOWN)
