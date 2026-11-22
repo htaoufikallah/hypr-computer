@@ -5,7 +5,8 @@ stdio MCP server that lets the model see the screen (screenshots) and drive the
 mouse and keyboard. It works with Claude Code, Codex, Gemini CLI, Cursor,
 VS Code, opencode and any other client that supports local MCP servers.
 
-It was built and tested on Omarchy running on Asahi Linux on an Apple M3 Max.
+It was built and tested on a 16-inch MacBook Pro with an M3 Max, running Omarchy 4.5
+and Hyprland 0.56 on Arch Linux ARM with the `linux-aurora` 7.2.11 kernel.
 
 ## Install
 

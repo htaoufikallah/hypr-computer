@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-time system setup for hypr-computer on Arch / Arch Linux ARM (Omarchy, Asahi).
+# One-time system setup for hypr-computer on Arch and Arch Linux ARM (including Omarchy).
 # Installs the input/capture tools and lets the logged-in user create virtual input
 # devices. Safe to re-run. Uses sudo for the package install and the two /etc files.
 set -euo pipefail
