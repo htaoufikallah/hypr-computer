@@ -236,22 +236,23 @@ save(json.dumps(data, indent=2) + "\n")
 PY
 }
 
-# True only if the agent CLI is really installed. A mise "lazy" shim would
-# download the whole agent the moment it runs; `mise which` checks without that.
-installed() {
+# A mise "lazy" shim on PATH downloads the whole agent the moment it runs, so
+# agent CLIs run only through agent(), which checks with `mise which` first.
+has_agent() {
   local p; p=$(command -v "$1") || return 1
   case "$p" in
     */mise/shims/*) mise which "$1" >/dev/null 2>&1 ;;
     *) return 0 ;;
   esac
 }
+agent() { has_agent "$1" || return 127; "$@"; }
 
 register() {
   case "$1" in
     claude)
-      installed claude || { warn "claude is not installed; skipped (install it, then re-run this command)"; return 0; }
-      if claude mcp list 2>/dev/null | grep -q "hypr-computer"; then info "already registered"
-      else run claude mcp add --transport stdio --scope user hypr-computer -- "${CMD[@]}"; fi ;;
+      has_agent claude || { warn "claude is not installed; skipped (install it, then re-run this command)"; return 0; }
+      if agent claude mcp list 2>/dev/null | grep -q "hypr-computer"; then info "already registered"
+      else run agent claude mcp add --transport stdio --scope user hypr-computer -- "${CMD[@]}"; fi ;;
     codex) write_config codex "${CODEX_HOME:-$HOME/.codex}/config.toml" ;;
     opencode)
       local oc="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
@@ -275,10 +276,10 @@ if [ -n "$CLIENTS" ]; then
 fi
 
 # Claude Code plugin installs keep their own copy; bring it up to date too.
-if installed claude && claude plugin list 2>/dev/null | grep -q "hypr-computer@hypr-computer"; then
+if agent claude plugin list 2>/dev/null | grep -q "hypr-computer@hypr-computer"; then
   step "Claude Code plugin"
-  run claude plugin marketplace update hypr-computer >/dev/null
-  run claude plugin update hypr-computer@hypr-computer | sed 's/^/    /'
+  run agent claude plugin marketplace update hypr-computer >/dev/null
+  run agent claude plugin update hypr-computer@hypr-computer | sed 's/^/    /'
 fi
 
 # ------------------------------------------------------------------- done
