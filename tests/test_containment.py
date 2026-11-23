@@ -9,6 +9,7 @@ import time
 import pytest
 
 import server
+from fakes import FakeHyprland, fake_bin
 from test_perception import APPLY, atspi, chromium_page, client  # noqa: F401
 
 SERVER = os.path.join(os.path.dirname(__file__), "..", "server.py")
@@ -246,3 +247,47 @@ def test_a_mouse_move_after_a_minute_without_input_is_not_the_user_taking_over(d
     time.sleep(0.3)
     desktop.call("key", combo="a")
     assert desktop.input.events == [("click", "left", 1), ("chord", (30,))]
+
+
+def can_make_namespaces() -> bool:
+    probe = ("import ctypes, sys; sys.exit(ctypes.CDLL(None, use_errno=True).unshare(0x10000000 | 0x40000000) != 0)")
+    return subprocess.run([sys.executable, "-c", probe]).returncode == 0
+
+
+def self_check(tmp_path, **env) -> list[str]:
+    hypr = FakeHyprland()
+    try:
+        r = subprocess.run([sys.executable, SERVER, "--check"], capture_output=True, text=True, timeout=60,
+                           env={**os.environ, **hypr.env, "PATH": f"{fake_bin(str(tmp_path / 'bin'))}:{os.environ['PATH']}",
+                                "FAKE_GRIM_SIZE": "64x40", "FAKE_GRIM_MARK": "", **env})
+    finally:
+        hypr.close()
+    return r.stdout.splitlines()
+
+
+@pytest.mark.skipif(not can_make_namespaces(), reason="this kernel doesn't let programs make network namespaces")
+def test_the_server_and_the_programs_it_runs_have_no_network_but_reach_hyprland(tmp_path, monkeypatch):
+    for var in ("HYPR_COMPUTER_SANDBOX", "DBUS_SESSION_BUS_ADDRESS", "AT_SPI_BUS_ADDRESS"):
+        monkeypatch.delenv(var, raising=False)
+    lines = self_check(tmp_path)
+    assert "PASS  network: blocked (test connections to 1.1.1.1 and 2606:4700:4700::1111 failed)" in lines
+    assert "PASS  Hyprland reachable: Hyprland 0.57.2" in lines and any(x.startswith("PASS  screenshot") for x in lines)
+    child = ("import socket\ntry:\n    socket.create_connection(('1.1.1.1', 443), timeout=2)\n    print('connected')\n"
+             "except OSError as e:\n    print(e.strerror)")
+    driver = (f"import subprocess, sys; sys.path.insert(0, {os.path.dirname(SERVER)!r}); import server; "
+              f"assert server.confine() == ''; print(subprocess.run([sys.executable, '-c', {child!r}], "
+              "capture_output=True, text=True).stdout.strip())")
+    r = subprocess.run([sys.executable, "-c", driver], capture_output=True, text=True, timeout=30)
+    assert r.stdout.strip() == "Network is unreachable", r.stderr
+
+
+@pytest.mark.parametrize("env, why", [
+    ({"HYPR_COMPUTER_SANDBOX": "off"}, "turned off with HYPR_COMPUTER_SANDBOX=off"),
+    ({"DBUS_SESSION_BUS_ADDRESS": "unix:abstract=/tmp/dbus-x1,guid=0"},
+     "DBUS_SESSION_BUS_ADDRESS is an abstract socket, which the sandbox would cut off"),
+])
+def test_the_self_check_warns_when_the_network_is_not_blocked_but_does_not_fail_for_it(tmp_path, env, why):
+    lines = self_check(tmp_path, **env)
+    assert f"WARN  network: not blocked: {why}" in lines
+    failed = sum(line.startswith("FAIL") for line in lines)
+    assert lines[-1] == (f"{failed} check(s) failed." if failed else "hypr-computer is ready.")

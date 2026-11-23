@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import collections
 import contextlib
+import ctypes
 import functools
 import glob
 import hashlib
@@ -1847,17 +1848,60 @@ def build_server():
     return mcp
 
 
+CLONE_NEWUSER, CLONE_NEWNET = 0x10000000, 0x40000000
+_unconfined = "the server sets up its sandbox only when it starts"  # why the network is reachable; "" if not
+
+
+def confine() -> str:
+    """Moves this process into a new user and network namespace, so that neither it nor any program it starts
+    (grim, wtype, tesseract, the accessibility helper) can reach the network: the namespace has only a loopback
+    interface, which is down. Files and path sockets (Wayland, Hyprland, D-Bus) work as before. Abstract sockets
+    belong to the network namespace, so a D-Bus bus on one would be cut off. Apps started through Hyprland run
+    outside. Returns why the network is still reachable, or "" once it isn't."""
+    if os.environ.get("HYPR_COMPUTER_SANDBOX", "on").strip().lower() == "off":
+        return "turned off with HYPR_COMPUTER_SANDBOX=off"
+    for var in ("DBUS_SESSION_BUS_ADDRESS", "AT_SPI_BUS_ADDRESS"):
+        if "abstract=" in os.environ.get(var, ""):
+            return f"{var} is an abstract socket, which the sandbox would cut off"
+    probe = os.fork()  # try in a child first: a process can't leave a namespace it entered halfway
+    if probe == 0:
+        os._exit(enter_namespace())
+    err = os.waitstatus_to_exitcode(os.waitpid(probe, 0)[1]) or enter_namespace()
+    return f"this system doesn't let programs make a network namespace ({os.strerror(err)})" if err else ""
+
+
+def enter_namespace() -> int:
+    """Enters a new user and network namespace, keeping this user's IDs. Returns 0, or why it failed (errno)."""
+    uid, gid = os.getuid(), os.getgid()
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.unshare(CLONE_NEWUSER | CLONE_NEWNET) != 0:
+        return ctypes.get_errno()
+    try:
+        for name, line in (("uid_map", f"{uid} {uid} 1"), ("setgroups", "deny"), ("gid_map", f"{gid} {gid} 1")):
+            with open(f"/proc/self/{name}", "w") as f:
+                f.write(line)
+    except OSError as e:
+        return e.errno or 1
+    return 0
+
+
+class CheckWarning(Exception):
+    pass
+
+
 def self_check() -> int:
-    results: list[tuple[bool, str, str]] = []
+    results: list[tuple[str, str, str]] = []
 
     def fail(msg: str):
         raise RuntimeError(msg)
 
     def check(name: str, fn) -> None:
         try:
-            results.append((True, name, fn() or "ok"))
+            results.append(("PASS", name, fn() or "ok"))
+        except CheckWarning as e:
+            results.append(("WARN", name, str(e)))
         except Exception as e:  # noqa: BLE001
-            results.append((False, name, str(e)))
+            results.append(("FAIL", name, str(e)))
 
     for tool in REQUIRED_TOOLS:
         check(f"{tool} installed", lambda t=tool: binary(t))
@@ -1897,10 +1941,23 @@ def self_check() -> int:
     check("not stopped", lambda: fail(f"{stop_file()} exists; delete it to allow actions")
           if os.path.exists(stop_file()) else "ok")
 
+    def network() -> str:
+        if _unconfined:
+            raise CheckWarning(f"not blocked: {_unconfined}")
+        hosts = ("1.1.1.1", "2606:4700:4700::1111")
+        for host in hosts:
+            try:
+                socket.create_connection((host, 443), timeout=2).close()
+            except OSError:
+                continue
+            fail(f"a test connection to {host} went through, so the sandbox doesn't work")
+        return f"blocked (test connections to {' and '.join(hosts)} failed)"
+    check("network", network)
+
     print(f"hypr-computer {RUNNING_VERSION} ({os.path.dirname(os.path.abspath(__file__))})")
-    for ok, name, detail in results:
-        print(f"{'PASS' if ok else 'FAIL'}  {name}: {detail}")
-    failed = sum(not ok for ok, _, _ in results)
+    for status, name, detail in results:
+        print(f"{status}  {name}: {detail}")
+    failed = sum(status == "FAIL" for status, _, _ in results)
     print("hypr-computer is ready." if not failed else f"{failed} check(s) failed.")
     return 1 if failed else 0
 
@@ -1959,6 +2016,7 @@ if __name__ == "__main__":
     if sys.argv[1:2] == ["--allow"]:
         sys.exit(allow_command(sys.argv[2:]))
     if "--check" in sys.argv[1:]:
+        _unconfined = confine()
         sys.exit(self_check())
     if "--stop" in sys.argv[1:]:
         open(stop_file(), "w").close()
@@ -1969,4 +2027,7 @@ if __name__ == "__main__":
             os.remove(stop_file())
         print("resumed")
         sys.exit(0)
+    _unconfined = confine()
+    if _unconfined:
+        print(f"hypr-computer: the network is not blocked: {_unconfined}", file=sys.stderr)
     build_server().run()
