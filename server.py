@@ -22,6 +22,7 @@ import re
 import select
 import shlex
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -31,7 +32,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from wl_input import VirtualInput  # noqa: E402
+from wl_input import US_KEYS, VirtualInput  # noqa: E402
 
 MAX_EDGE = int(os.environ.get("HYPR_COMPUTER_MAX_EDGE", "1456"))  # stay under model downscaling
 REQUIRED_TOOLS = ("grim", "xkbcli")
@@ -390,8 +391,105 @@ def hypr_json(what: str):
     return json.loads(hypr("j/" + what))
 
 
+def lua(name: str, *args) -> None:
+    hypr_command(f"eval hl.{name}({', '.join(map(lua_literal, args))})")
+
+
+AGENT = "hypr-computer"  # the agent display: a headless output of this name, showing a workspace of this name
+AGENT_WORKSPACE, PARKED = f"name:{AGENT}", f"special:{AGENT}"  # PARKED keeps its windows while it's off
+AGENT_GAP = 1000  # logical pixels between the agent display and the user's monitors, more than a pointer motion jumps
+AGENT_OFF = 'The agent display is off; start it with agent_display(action="start").'
+_view = "user"  # the display the agent's coordinates refer to, the one it last saw: "user" or "agent"
+
+
+def split_monitors(monitors: list[dict]) -> tuple[list[dict], dict | None]:
+    """The user's monitors, and the agent display if it is on."""
+    return [m for m in monitors if m["name"] != AGENT], next((m for m in monitors if m["name"] == AGENT), None)
+
+
+def on_agent(c: dict, agent: dict | None) -> bool:
+    return agent is not None and c.get("monitor") == agent["id"]
+
+
+def display_of(c: dict, monitors: list[dict]) -> str:
+    return "agent" if on_agent(c, split_monitors(monitors)[1]) else "user"
+
+
+def agent_rule(users: list[dict]) -> dict:
+    """The agent display's monitor rule: 16:10 and no wider than a screenshot, so screenshots show it at its own
+    size, at scale 2, so text is sharp enough to read by OCR, and above and left of the user's monitors,
+    AGENT_GAP away. Their pointer can't cross that gap, and Hyprland places their automatically placed
+    monitors right of explicitly placed ones that reach x > 0, so it leaves them where they are."""
+    w = min(1280, int(MAX_EDGE)) // 8 * 8
+    h = w * 5 // 8
+    boxes = [monitor_box(m) for m in users]
+    x = math.floor(min((b[0] for b in boxes), default=0)) - AGENT_GAP - w
+    y = math.floor(min((b[1] for b in boxes), default=0)) - AGENT_GAP - h
+    return {"output": AGENT, "mode": f"{2 * w}x{2 * h}", "position": f"{x}x{y}", "scale": 2}
+
+
+def place_agent_display(users: list[dict]) -> None:
+    """Sets the agent display's rules. Its windows, and the ones parked while it's off, may ask to be focused
+    (a browser does when it opens a page in a new tab), and Hyprland would take the user's focus and pointer
+    there, so they can't."""
+    lua("monitor", agent_rule(users))
+    lua("workspace_rule", {"workspace": AGENT_WORKSPACE, "monitor": AGENT, "default": True})
+    for name, workspace_ in ((AGENT, AGENT_WORKSPACE), (f"{AGENT}-parked", PARKED)):
+        lua("window_rule", {"name": name, "match": {"workspace": workspace_}, "focus_on_activate": False})
+
+
+def in_place(users: list[dict], agent: dict) -> dict:
+    """The agent display, put back if it isn't where agent_rule says: a config reload drops its rules, and then
+    Hyprland makes it 1920x1080, next to the user's monitors."""
+    rule = agent_rule(users)
+    if ((rule["mode"], rule["position"], rule["scale"])
+            == (f'{agent["width"]}x{agent["height"]}', f'{agent["x"]}x{agent["y"]}', agent["scale"])):
+        return agent
+    place_agent_display(users)
+    return split_monitors(hypr_json("monitors"))[1] or agent
+
+
+def view_region(monitors: list[dict], where: str) -> tuple[Layout, list[str]]:
+    """A display's layout, and the grim arguments that capture it: the user's monitors without the agent display
+    and the gap around it, or the agent display alone."""
+    users, agent = split_monitors(monitors)
+    if where == "agent":
+        if agent is None:
+            raise RuntimeError(AGENT_OFF)
+        return layout_from_monitors([in_place(users, agent)]), ["-o", AGENT]
+    lay = layout_from_monitors(users)
+    return lay, (["-g", f"{lay.x0:.0f},{lay.y0:.0f} {lay.width:.0f}x{lay.height:.0f}"] if agent else [])
+
+
 def current_layout() -> Layout:
-    return layout_from_monitors(hypr_json("monitors"))
+    """The layout that coordinates map onto: that of the display the agent last saw."""
+    monitors = hypr_json("monitors")
+    if _view == "agent" and split_monitors(monitors)[1] is None:
+        raise RuntimeError("The agent display is off now, so coordinates from its screenshots point nowhere. "
+                           "Take a screenshot.")
+    return view_region(monitors, _view)[0]
+
+
+def look_at(target: str = "") -> str:
+    """Makes `target` the display that coordinates refer to: "user", "agent", or "" for the one the agent saw last
+    (the user's once the agent display is off)."""
+    global _view
+    if target not in ("", "user", "agent"):
+        raise ValueError('target must be "user" or "agent"')
+    where = target or _view
+    if where == "agent" and split_monitors(hypr_json("monitors"))[1] is None:
+        if target:
+            raise RuntimeError(AGENT_OFF)
+        where = "user"
+    _view = where
+    return where
+
+
+def shot_point(lay: Layout, x: float, y: float) -> tuple[int, int]:
+    sw, sh = lay.shot_size
+    if not (0 <= x <= sw and 0 <= y <= sh):
+        raise ValueError(f"({x:g}, {y:g}) is outside the screenshot, which is {sw}x{sh}")
+    return lay.to_logical(x, y)
 
 
 def clip(text: str, n: int = 60) -> str:
@@ -676,25 +774,29 @@ def on_top(under: list[dict]) -> list[dict]:
     return [c for c in under if c.get("fullscreen") or c.get("floating")] or under
 
 
-def guard(point: tuple[int, int] | None = None, target: Target | None = None, hyprland: bool = False) -> None:
+def guard(point: tuple[int, int] | None = None, target: Target | None = None, hyprland: bool = False,
+          window: dict | None = None, background: bool = False) -> None:
     """Checks an input action before it starts: the user hasn't stopped agents or taken the mouse, and the action
-    touches no deny-listed window and only apps the user allowed. It acts at `point`, on `target`, or else on the
-    focused window; with `hyprland`, also on Hyprland itself."""
+    touches no deny-listed window and only apps the user allowed. It acts at `point`, on `target`, on `window` in
+    the background, or else on the focused window; with `hyprland`, also on Hyprland itself. A `background`
+    action, like one with `window`, leaves the focused window alone, and the user moving the mouse doesn't stop
+    it."""
     global _last_action
     check_stop()
-    check_user()
+    if window is None and not background:
+        check_user()
     pattern, grant = deny_pattern(), read_grant()
     if pattern is not None or grant is not None:
-        active = hypr_json("activewindow") or {}
+        aimed = [window] if window is not None else [] if background else [hypr_json("activewindow") or {}]
         under = (windows_at(hypr_json("clients"), *point, visible_workspaces(hypr_json("monitors")))
                  if point is not None else [])
-        hit = denied_window([active, *under], pattern)
+        hit = denied_window([*aimed, *under], pattern)
         if hit:
             raise refused(f"Refused: '{hit.get('class')}' is on the deny-list "
                           "(HYPR_COMPUTER_DENY). Ask the user to do this step.")
         if grant is not None:
             targets = ([target] if target else [window_target(w) for w in on_top(under)] if point is not None
-                       else [window_target(active)] if active else [])
+                       else [window_target(w) for w in aimed if w])
             why = grant_refusal(grant, targets + [HYPRLAND] * hyprland)
             if why:
                 raise refused(why)
@@ -706,6 +808,98 @@ def guard(point: tuple[int, int] | None = None, target: Target | None = None, hy
         except RuntimeError:
             pass
     _last_action = now
+
+
+@dataclass(frozen=True)
+class Seat:
+    """The user's pointer, and the window and monitor that have their keyboard focus."""
+    pointer: tuple[float, float] | None
+    window: str  # its address, or "" when no window has focus
+    monitor: str
+
+
+def seat() -> Seat:
+    focused = next((m["name"] for m in hypr_json("monitors") if m.get("focused")), "")
+    return Seat(pointer(), (hypr_json("activewindow") or {}).get("address", ""), focused)
+
+
+def give_back(was: Seat) -> str:
+    """Puts the user's pointer and keyboard focus back where they were. Focusing their monitor first takes focus
+    off a window on the agent display even when no window of theirs had it. Warping onto another monitor focuses
+    the window under the pointer, and within one it doesn't, so the warp comes next, then the window. A seat
+    that wasn't on the user's monitors goes back to their first one instead. Returns what it couldn't put back."""
+    users = split_monitors(hypr_json("monitors"))[0]
+    if users and not any(m["name"] == was.monitor for m in users):
+        was = Seat(None, "", users[0]["name"])
+    if seat() == was:
+        return ""
+    if was.monitor:
+        dispatch("focus", {"monitor": was.monitor})
+    if was.pointer:
+        dispatch("cursor.move", {"x": was.pointer[0], "y": was.pointer[1]})
+    if was.window and seat().window != was.window:
+        with contextlib.suppress(RuntimeError):  # it closed
+            dispatch("focus", {"window": "address:" + was.window})
+        if was.pointer:
+            dispatch("cursor.move", {"x": was.pointer[0], "y": was.pointer[1]})
+    now = seat()
+    lost = [what for what, a, b in (("pointer", now.pointer, was.pointer or now.pointer),
+                                    ("keyboard focus", now.window, was.window)) if a != b]
+    return f"Couldn't put the user's {' and '.join(lost)} back where it was." if lost else ""
+
+
+IDLE_S = 2.0  # how long the user must leave the mouse and keyboard alone before a click borrows their pointer
+KEY_COUNTER = ("if not HYPR_COMPUTER_KEYS then HYPR_COMPUTER_KEYS = 0; HYPR_COMPUTER_KEYS_SUB = "
+               "hl.on('input.keyboard.key', function() HYPR_COMPUTER_KEYS = HYPR_COMPUTER_KEYS + 1 end) end")
+KEY_COUNTER_OFF = ("if HYPR_COMPUTER_KEYS_SUB then HYPR_COMPUTER_KEYS_SUB:remove() end; "
+                   "HYPR_COMPUTER_KEYS_SUB = nil; HYPR_COMPUTER_KEYS = nil")
+USER_BUSY = ("Refused: the user is using the mouse or keyboard, and a click on the agent display borrows their "
+             "pointer. Use key or type_text with window=, or ui_act, or try again once they pause.")
+_still: tuple[tuple, float] | None = None  # what the user's pointer and keyboard last showed, and since when
+
+
+def note_activity() -> float:
+    """Since when the user has left the pointer and keyboard alone, as far as this server has seen. Key presses
+    are counted (not recorded) by a handler in Hyprland that this installs if a config reload removed it."""
+    global _still
+    keys = hypr("/repl return HYPR_COMPUTER_KEYS").strip()
+    if keys == "nil":
+        hypr_command("eval " + KEY_COUNTER)
+        keys = "0"
+    seen = (pointer(), keys)
+    if _still is None or seen != _still[0]:
+        _still = (seen, time.monotonic())
+    return _still[1]
+
+
+def user_idle() -> bool:
+    """Whether the user has left the pointer and keyboard alone for IDLE_S, watching up to that long."""
+    since = note_activity()
+    while time.monotonic() - since < IDLE_S:
+        time.sleep(0.1)
+        if note_activity() != since:
+            return False
+    return True
+
+
+def borrow(point: tuple[int, int], kind: str, act) -> str:
+    """Does `act` with the user's pointer at `point` on the agent display, then puts their pointer and focus back.
+    There is one pointer, so only while they leave it and the keyboard alone. Only on a window: the user's bar
+    shows on the agent display too, and a click on it would act on their desktop."""
+    if not windows_at(hypr_json("clients"), *point, visible_workspaces(hypr_json("monitors"))):
+        raise ValueError("there's no window at that point on the agent display, only what belongs to the user, "
+                         "such as their bar")
+    if not user_idle():
+        raise refused(USER_BUSY)
+    was = seat()
+    t = time.perf_counter()
+    dispatch("cursor.move", {"x": point[0], "y": point[1]})
+    try:
+        with_input(kind, act)
+    finally:
+        lost = give_back(was)
+    ms = (time.perf_counter() - t) * 1000
+    return f" on the agent display, borrowing the user's pointer for {ms:.0f} ms" + (f". {lost}" if lost else "")
 
 
 PPM_HEADER = re.compile(rb"P6\s+(\d+)\s+(\d+)\s+255\s")
@@ -730,6 +924,7 @@ class Screen:
     clients: list[dict]
     monitors: list[dict]
     note: str = ""  # tells the agent what was blacked out
+    where: str = "user"  # the display it shows: the user's monitors, or the agent display
 
     @property
     def px(self) -> float:
@@ -829,13 +1024,15 @@ def hidden_boxes(pattern: re.Pattern, clients: list[dict], monitors: list[dict],
     return boxes
 
 
-def grab() -> Screen:
-    """The screen at full resolution, with deny-listed windows blacked out. Windows are looked up before and
+def grab(where: str = "user") -> Screen:
+    """A display at full resolution, with deny-listed windows blacked out. Windows are looked up before and
     after the capture, and both places are painted. If a deny-listed window moved, opened or closed around
     the capture, the whole screen is blacked out instead."""
     pattern = deny_pattern()
     monitors, clients = hypr_json("monitors"), hypr_json("clients")
-    lay = layout_from_monitors(monitors)
+    lay, region = view_region(monitors, where)
+    if where == "agent":
+        note_activity()  # so that a click soon after knows how long the user has been idle
     denied = [c for c in clients if denied_window([c], pattern)] if pattern else []
     watched = bool(denied or _goals) or bool(pattern) and any(
         e.kind == "close" and denied_window([e.window], pattern) for e in EVENTS.since(time.monotonic() - 5))
@@ -844,13 +1041,13 @@ def grab() -> Screen:
     started = time.monotonic()
     with spent("capture_ms"):
         from PIL import Image, ImageDraw
-        raw = run("grim", "-t", "ppm", "-")
+        raw = run("grim", *region, "-t", "ppm", "-")
         head = PPM_HEADER.match(raw)
         if head is None:
             raise RuntimeError("grim returned something other than a PPM image")
         img = Image.frombuffer("RGB", (int(head[1]), int(head[2])), memoryview(raw)[head.end():], "raw", "RGB", 0, 1)
     if pattern is None:
-        return Screen(lay, img, clients, monitors)
+        return Screen(lay, img, clients, monitors, where=where)
     after, after_monitors = hypr_json("clients"), hypr_json("monitors")
     denied_after = [c for c in after if denied_window([c], pattern)]
     hidden: list[Box] | str = []
@@ -872,11 +1069,11 @@ def grab() -> Screen:
                                 math.ceil((x + w - lay.x0) * k) - 1, math.ceil((y + h - lay.y0) * k) - 1), fill=0)
     note = (hidden if isinstance(hidden, str) else
             "Black areas hide deny-listed windows (password managers)." if hidden else "")
-    return Screen(lay, img, after, after_monitors, note)
+    return Screen(lay, img, after, after_monitors, note, where)
 
 
-def frame() -> tuple[Screen, object, bytes]:
-    scr = grab()
+def frame(where: str) -> tuple[Screen, object, bytes]:
+    scr = grab(where)
     size = scr.layout.shot_size
     with spent("capture_ms"):
         from PIL import Image
@@ -884,10 +1081,11 @@ def frame() -> tuple[Screen, object, bytes]:
         return scr, img, hashlib.blake2b(img.tobytes(), digest_size=16).digest()
 
 
-def capture(skip_unchanged: bool = False) -> tuple[bytes | None, str]:
+def capture(target: str = "", skip_unchanged: bool = False) -> tuple[bytes | None, str]:
     global _shown
     settle()
-    scr, img, digest = frame()
+    where = look_at(target)
+    scr, img, digest = frame(where)
     if skip_unchanged and digest == _shown:
         return None, UNCHANGED
     _shown = digest
@@ -895,16 +1093,20 @@ def capture(skip_unchanged: bool = False) -> tuple[bytes | None, str]:
         out = io.BytesIO()
         img.save(out, "JPEG", quality=80)
     lay = scr.layout
-    return out.getvalue(), (f"Screenshot {img.width}x{img.height} px (desktop {int(lay.width)}x{int(lay.height)} "
-                            "logical)." + (" " + scr.note if scr.note else ""))
+    said = ("of the agent display" if where == "agent" else
+            f"(desktop {int(lay.width)}x{int(lay.height)} logical)")
+    return out.getvalue(), f"Screenshot {img.width}x{img.height} px {said}." + (" " + scr.note if scr.note else "")
 
 
 def pointer_shot() -> tuple[int, int]:
+    """Where the pointer is, in screenshots of the user's screen."""
     pos = hypr_json("cursorpos")
-    return current_layout().to_shot(pos["x"], pos["y"])
+    return view_region(hypr_json("monitors"), "user")[0].to_shot(pos["x"], pos["y"])
 
 
 def state_line() -> str:
+    if _view == "agent":
+        return "Coordinates are pixels in screenshots of the agent display."
     w = hypr_json("activewindow") or {}
     title = HIDDEN_TITLE if denied_window([w], deny_pattern()) else w.get("title")
     active = " ".join(f"{w.get('class')} — {title}".split()) if w else "none"
@@ -915,22 +1117,38 @@ def act_click(x: float, y: float, button: str = "left", count: int = 1) -> str:
     if button not in ("left", "right", "middle"):
         raise ValueError("button must be left, right or middle")
     lay = current_layout()
-    guard(lay.to_logical(x, y))
+    point = shot_point(lay, x, y)
+    did = f"clicked {button} x{count} at ({x}, {y})"
+    click = lambda v: v.click(button, max(1, min(3, count)))  # noqa: E731
+    if _view == "agent":
+        guard(point, background=True)
+        return did + borrow(point, "click", click)
+    guard(point)
     move_pointer(lay, x, y)
-    with_input("click", lambda v: v.click(button, max(1, min(3, count))))
-    return f"clicked {button} x{count} at ({x}, {y})"
+    with_input("click", click)
+    return did
+
+
+def pointer_only_on_the_users_screen(what: str) -> None:
+    if _view == "agent":
+        raise ValueError(f"{what} works only on the user's screen, because the pointer is theirs. On the agent "
+                         "display use click, scroll, key, type_text or ui_act.")
 
 
 def act_move(x: float, y: float) -> str:
+    pointer_only_on_the_users_screen("move")
     lay = current_layout()
-    guard(lay.to_logical(x, y))
+    guard(shot_point(lay, x, y))
     move_pointer(lay, x, y)
     mark_input("move")
     return f"moved to ({x}, {y})"
 
 
 def act_drag(x1: float, y1: float, x2: float, y2: float) -> str:
+    pointer_only_on_the_users_screen("drag")
     lay = current_layout()
+    shot_point(lay, x1, y1)
+    shot_point(lay, x2, y2)
     path = [(x1 + (x2 - x1) * i / 10, y1 + (y2 - y1) * i / 10) for i in range(11)]
     for p in path:
         guard(lay.to_logical(*p))
@@ -956,13 +1174,51 @@ def act_scroll(x: float, y: float, direction: str = "down", amount: int = 3) -> 
     if not dx and not dy:
         raise ValueError("direction must be up, down, left or right")
     lay = current_layout()
-    guard(lay.to_logical(x, y))
+    point = shot_point(lay, x, y)
+    did = f"scrolled {direction} {amount} at ({x}, {y})"
+    if _view == "agent":
+        guard(point, background=True)
+        return did + borrow(point, "scroll", lambda v: v.scroll(dx, dy))
+    guard(point)
     move_pointer(lay, x, y)
     with_input("scroll", lambda v: v.scroll(dx, dy))
-    return f"scrolled {direction} {amount} at ({x}, {y})"
+    return did
 
 
-def act_type(text: str) -> str:
+def agent_window(query: str) -> dict:
+    """The window on the agent display that best matches `query`, for input in the background."""
+    agent = split_monitors(hypr_json("monitors"))[1]
+    if agent is None:
+        raise RuntimeError(AGENT_OFF)
+    hits = matching_windows(redacted([c for c in hypr_json("clients") if on_agent(c, agent)]), query)
+    if not hits:
+        raise ValueError(f"no window on the agent display matches {query!r}; list_windows shows them")
+    if hits[0].get("denied"):
+        raise refused(f"Refused: '{hits[0].get('class')}' is on the deny-list. Ask the user.")
+    return hits[0]
+
+
+MOD_NAMES = {1: "SHIFT", 4: "CTRL", 8: "ALT", 64: "SUPER", 128: "MOD5"}  # by Hyprland's modmask bit
+
+
+def send_keys(w: dict, keys: list[tuple[str, int]]) -> None:
+    """Presses each (modifiers, evdev keycode) in window `w` without focusing it. Hyprland hands the window
+    keyboard focus for each key and gives it back, so the user's focus and pointer stay where they are."""
+    for mods, code in keys:
+        dispatch("send_shortcut", {"mods": mods, "key": f"code:{code + 8}", "window": "address:" + w["address"]})
+
+
+def act_type(text: str, window: str = "") -> str:
+    if window:
+        w = agent_window(window)
+        bad = sorted({ch for ch in text if ch not in US_KEYS})
+        if bad:
+            raise ValueError("typing into a window on the agent display takes ASCII only, not "
+                             + ", ".join(map(repr, bad)))
+        guard(window=w)
+        send_keys(w, [("SHIFT" if shift else "", code) for code, shift in map(US_KEYS.get, text)])
+        mark_input("type")
+        return f"typed {len(text)} characters into {w['class']} on the agent display"
     guard()
     for kind, part in text_runs(text):
         if kind == "vk":
@@ -987,8 +1243,17 @@ def hyprland_bind(codes: list[int]) -> bool:
                                              or b.get("keycode") == codes[-1] + 8) for b in binds)
 
 
-def act_key(combo: str) -> str:
+def act_key(combo: str, window: str = "") -> str:
     codes = parse_combo(combo)
+    if window:
+        w = agent_window(window)
+        mods = [MOD_NAMES.get(MODIFIER_BITS.get(c, 0)) for c in codes[:-1]]
+        if None in mods:
+            raise ValueError("in a window on the agent display, a key combo is modifiers and one key, like ctrl+l")
+        guard(window=w)
+        send_keys(w, [(" ".join(mods), codes[-1])])
+        mark_input("key")
+        return f"pressed {combo} in {w['class']} on the agent display"
     guard(hyprland=read_grant() is not None and hyprland_bind(codes))
     with_input("key", lambda v: v.chord(codes))
     return f"pressed {combo}"
@@ -1067,10 +1332,12 @@ def text_pattern(query: str) -> re.Pattern:
 
 
 def on_screen_window(scr: Screen, query: str) -> dict:
-    shown = visible_workspaces(scr.monitors)
-    hits = sorted(matching_windows(redacted(scr.clients), query), key=lambda c: workspace(c) not in shown)
+    shown, agent = visible_workspaces(scr.monitors), split_monitors(scr.monitors)[1]
+    here = [c for c in redacted(scr.clients) if on_agent(c, agent) == (scr.where == "agent")]
+    hits = sorted(matching_windows(here, query), key=lambda c: workspace(c) not in shown)
     if not hits:
-        raise ValueError(f"no window matches {query!r}; call list_windows")
+        place = "the agent display" if scr.where == "agent" else "the user's screen"
+        raise ValueError(f"no window on {place} matches {query!r}; call list_windows")
     w = hits[0]
     if w.get("denied"):
         raise refused(f"Refused: '{w.get('class')}' is on the deny-list. Ask the user.")
@@ -1085,10 +1352,10 @@ def window_class_at(scr: Screen, lx: float, ly: float) -> str:
     return top.get("class", "") if top else ""
 
 
-def read_text(pattern: re.Pattern, window: str = "") -> tuple[list[TextHit], str]:
-    """Text matching `pattern` on the screen, or in one window, read at full resolution, top to bottom, and
+def read_text(pattern: re.Pattern, window: str = "", where: str = "user") -> tuple[list[TextHit], str]:
+    """Text matching `pattern` on a display, or in one window, read at full resolution, top to bottom, and
     what was blacked out."""
-    scr = grab()
+    scr = grab(where)
     lay = scr.layout
     region = window_box(on_screen_window(scr, window)) if window else (lay.x0, lay.y0, lay.width, lay.height)
     (ox, oy), img = scr.crop(region)
@@ -1125,7 +1392,7 @@ def describe_hits(hits: list[TextHit], query: str, note: str) -> str:
 
 
 def act_click_text(query: str, nth: int = 1, window: str = "") -> str:
-    hits, note = read_text(text_pattern(query), window)
+    hits, note = read_text(text_pattern(query), window, look_at())
     if not 1 <= nth <= len(hits):
         raise ValueError(f"found {len(hits)} match(es) for {query!r} on screen, so there is no match {nth}."
                          + (" " + note if note else ""))
@@ -1135,9 +1402,9 @@ def act_click_text(query: str, nth: int = 1, window: str = "") -> str:
 
 
 def text_shown(pattern: re.Pattern, timeout: float) -> Event | None:
-    end = time.monotonic() + timeout
+    end, where = time.monotonic() + timeout, look_at()
     while True:
-        hits = read_text(pattern)[0]
+        hits = read_text(pattern, where=where)[0]
         if hits:
             return Event(time.monotonic(), "text", {"title": hits[0].text})
         if time.monotonic() >= end:
@@ -1178,11 +1445,11 @@ def happened(event: str, pattern: re.Pattern | None, since: float) -> Event | No
 
 
 def screen_stable(timeout: float) -> Event | None:
-    end = time.monotonic() + timeout
+    end, where = time.monotonic() + timeout, look_at()
     settle()
     last = None
     while True:
-        digest = frame()[2]
+        digest = frame(where)[2]
         if digest == last:
             return Event(time.monotonic(), "stable")
         last = digest
@@ -1240,7 +1507,8 @@ def run_steps(steps: list[dict]) -> tuple[list[str], bool]:
             log.append(f"step {i}: unknown action {name!r}; use one of {', '.join(ACTIONS)}. Stopped.")
             return log, False
         try:
-            check_user()
+            if not (_view == "agent" or step.get("window")):  # work on the agent display doesn't need the pointer
+                check_user()
         except Refused as e:
             log.append(f"Stopped before step {i}: {e} Step {i} and later were not run.")
             return log, False
@@ -1410,6 +1678,126 @@ def with_a11y(cmd: list[str]) -> str:
     return " ".join(shlex.quote(a) for a in ["env", *env, cmd[0], *flags, *cmd[1:]])
 
 
+FIREFOX_FAMILY = ("firefox", "librewolf", "zen", "floorp")
+
+
+def own_profile(cmd: list[str]) -> list[str]:
+    """`cmd` with a browser profile of the agent display's own, so that the page opens in a browser there rather
+    than in a window of the user's running browser, and without their logins. A command naming a profile keeps
+    it. The profile is in $XDG_RUNTIME_DIR, so it goes when the user logs out."""
+    if any(a.startswith(("--user-data-dir", "--profile", "-profile", "-P")) for a in cmd[1:]):
+        return cmd
+    exe, path = os.path.basename(cmd[0]), os.path.join(session_env()["XDG_RUNTIME_DIR"], "hypr-computer-browser")
+    if any(k in exe for k in CHROMIUM_FAMILY):
+        return [cmd[0], f"--user-data-dir={path}", "--no-first-run", "--no-default-browser-check", *cmd[1:]]
+    if any(k in exe for k in FIREFOX_FAMILY):
+        os.makedirs(path, mode=0o700, exist_ok=True)
+        return [cmd[0], "--new-instance", "--profile", path, *cmd[1:]]
+    return cmd
+
+
+def where_to_open(where: str) -> str:
+    """Where launch_app and open_url open: "agent" or "user", by default the agent display while it's on."""
+    if where not in ("", "user", "agent"):
+        raise ValueError('where must be "user" or "agent"')
+    agent = split_monitors(hypr_json("monitors"))[1]
+    if where == "agent" and agent is None:
+        raise RuntimeError(AGENT_OFF)
+    return where or ("agent" if agent else "user")
+
+
+def agent_titles() -> dict[str, str]:
+    agent = split_monitors(hypr_json("monitors"))[1]
+    return {c["address"]: c.get("title") or "" for c in hypr_json("clients") if on_agent(c, agent)}
+
+
+def agent_page_ready(before: dict[str, str]) -> bool:
+    """Whether a window on the agent display has opened or changed its title to something other than a blank tab
+    since `before`. Windows there never have focus, so the focused window's title says nothing."""
+    return any(before.get(a) != t and not BLANK_TITLES.match(t.split(" - ")[0].strip())
+               for a, t in agent_titles().items())
+
+
+_started = False  # whether this server turned the agent display on, so turns it off when it exits
+
+
+def wait_for_agent_display(on: bool) -> dict | None:
+    end = time.monotonic() + 2
+    while True:
+        agent = split_monitors(hypr_json("monitors"))[1]
+        if (agent is not None) == on or time.monotonic() > end:
+            return agent
+        time.sleep(0.02)
+
+
+def agent_display_status() -> str:
+    monitors, clients = hypr_json("monitors"), hypr_json("clients")
+    agent = split_monitors(monitors)[1]
+    if agent is None:
+        parked = [c.get("class") or "a window" for c in clients if workspace(c) == PARKED]
+        return "The agent display is off." + (f" Its windows ({', '.join(parked)}) are parked out of sight, and "
+                                              "come back when it starts." if parked else "")
+    lay = layout_from_monitors([agent])
+    names = [c.get("class") or "a window" for c in redacted(clients) if on_agent(c, agent)]
+    return (f"The agent display is on: {lay.width:.0f}x{lay.height:.0f}, "
+            + (f"showing {', '.join(names)}" if names else "with no windows yet")
+            + ("." if _started else ", left on by an earlier session; start takes it over."))
+
+
+def start_agent_display() -> str:
+    """Turns the agent display on, or takes over one left on, and brings back the windows it parked. It is a
+    headless output that Hyprland lays out like a monitor; the user's monitors, focus and pointer stay put."""
+    global _started
+    users, agent = split_monitors(hypr_json("monitors"))
+    place_agent_display(users)
+    hypr_command("eval " + KEY_COUNTER)
+    lost = ""
+    if agent is None:
+        was = seat()
+        hypr_command(f"output create headless {AGENT}")
+        if wait_for_agent_display(on=True) is None:
+            raise RuntimeError("Hyprland didn't add the agent display")
+        lost = give_back(was)
+    for c in hypr_json("clients"):
+        if workspace(c) == PARKED:
+            dispatch("window.move", {"workspace": AGENT_WORKSPACE, "window": "address:" + c["address"],
+                                     "follow": False})
+    _started = True
+    look_at("agent")
+    return agent_display_status() + (" " + lost if lost else "")
+
+
+def stop_agent_display() -> str:
+    """Turns the agent display off. Its windows move to the special workspace PARKED, which Hyprland shows only
+    when asked, and come back when it starts again. Removing an output moves the pointer, so it goes back."""
+    global _started
+    monitors, clients = hypr_json("monitors"), hypr_json("clients")
+    agent = split_monitors(monitors)[1]
+    _started = False
+    if agent is None:
+        return "The agent display is already off."
+    parked = [c for c in clients if on_agent(c, agent)]
+    for c in parked:
+        dispatch("window.move", {"workspace": PARKED, "window": "address:" + c["address"], "follow": False})
+    was = seat()
+    hypr_command(f"output remove {AGENT}")
+    if wait_for_agent_display(on=False) is not None:
+        raise RuntimeError("Hyprland didn't remove the agent display")
+    lost = give_back(was)
+    with contextlib.suppress(RuntimeError):
+        hypr_command("eval " + KEY_COUNTER_OFF)
+    names = ", ".join(c.get("class") or "a window" for c in redacted(parked))
+    return ("The agent display is off." + (f" Its windows ({names}) are parked on the hidden workspace {PARKED} "
+                                            "until it starts again." if parked else "") + (" " + lost if lost else ""))
+
+
+def shutdown() -> None:
+    """When the server exits, turns off the agent display it turned on, parking its windows."""
+    if _started:
+        with contextlib.suppress(Exception):
+            stop_agent_display()
+
+
 A11Y_PYTHON = "/usr/bin/python3"  # the system Python, which has PyGObject; the server's own environment lacks it
 A11Y_HELPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "atspi_helper.py")
 A11Y_NODES = 5000
@@ -1568,7 +1956,8 @@ INSTRUCTIONS = CORE_INSTRUCTIONS + """
 - To wait for a page to load, a window to open or the screen to settle, use wait_for (or a wait_for
   step in a batch), not fixed waits or extra screenshots.
 - To find or click something by its visible text, use find_text or click_text. ui_find and ui_act use the
-  app's accessibility tree, where it has one (most browsers and GTK and Qt apps)."""
+  app's accessibility tree, where it has one (most browsers and GTK and Qt apps).
+- To work while the user keeps using their screen, agent_display(action="start") gives you one of your own."""
 
 
 def build_server():
@@ -1619,9 +2008,10 @@ def build_server():
         return register
 
     @tool(read_only=True)
-    def screenshot() -> list:
-        """Capture all monitors. Coordinates for every other tool are pixels in this image."""
-        data, info = capture()
+    def screenshot(target: str = "") -> list:
+        """Capture all monitors. Coordinates for every other tool are pixels in this image.
+        target: "user" (the user's screen) or "agent" (the agent display); default: the one you saw last."""
+        data, info = capture(target)
         return info, data
 
     @tool(destructive=True)
@@ -1649,16 +2039,17 @@ def build_server():
         return act_scroll(x, y, direction, amount)
 
     @tool(destructive=True)
-    def type_text(text: str, screenshot: bool = False):
-        """Type text into the focused window ("\\n" presses Enter). screenshot=true returns
-        the screen afterwards."""
-        return act_type(text)
+    def type_text(text: str, window: str = "", screenshot: bool = False):
+        """Type text into the focused window ("\\n" presses Enter), or with window= into that window on
+        the agent display, in the background. screenshot=true returns the screen afterwards."""
+        return act_type(text, window)
 
     @tool(destructive=True)
-    def key(combo: str, screenshot: bool = False):
+    def key(combo: str, window: str = "", screenshot: bool = False):
         """Press a key or chord: 'Return', 'ctrl+l', 'super+Return', 'ctrl+shift+t', 'F5'.
-        Hyprland keybinds work too. screenshot=true returns the screen afterwards."""
-        return act_key(combo)
+        Hyprland keybinds work too. window= presses it in that window on the agent display.
+        screenshot=true returns the screen afterwards."""
+        return act_key(combo, window)
 
     @tool(destructive=True, extra=True)
     def batch(steps: list[dict], screenshot: bool = True):
@@ -1666,7 +2057,8 @@ def build_server():
         (by default) return a screenshot. Prefer this whenever you already know the next
         few actions. Each step is {"action": NAME, ...args}, NAME one of:
         click{x,y,button?,count?} move{x,y} drag{x1,y1,x2,y2} scroll{x,y,direction?,amount?}
-        type{text} key{combo} wait{ms} wait_for{event,match?,timeout_ms?} click_text{query,nth?,window?}.
+        type{text,window?} key{combo,window?} wait{ms} wait_for{event,match?,timeout_ms?}
+        click_text{query,nth?,window?}.
         Stops before the next step if a deny-listed window opens or comes to the front.
         Example: [{"action":"key","combo":"ctrl+l"},{"action":"type","text":"example.com\\n"},
         {"action":"wait_for","event":"title"}]"""
@@ -1689,10 +2081,11 @@ def build_server():
             return str(e)
 
     @tool(read_only=True, extra=True)
-    def zoom(x: float, y: float, width: float, height: float) -> list:
+    def zoom(x: float, y: float, width: float, height: float, target: str = "") -> list:
         """Return a region of the last screenshot (x, y, width, height in screenshot pixels)
-        at full screen resolution, to read small text. Keep clicking in screenshot coordinates."""
-        scr = grab()
+        at full screen resolution, to read small text. Keep clicking in screenshot coordinates.
+        target as for screenshot."""
+        scr = grab(look_at(target))
         lay = scr.layout
         lx, ly = lay.to_logical(x, y)
         lw, lh = max(1, round(width / lay.factor)), max(1, round(height / lay.factor))
@@ -1715,22 +2108,28 @@ def build_server():
         """Focus (and switch to the workspace of) the window whose class or title contains query,
         e.g. 'chromium', 'foot', 'Inbox'. Cheaper than finding it in a screenshot.
         screenshot=true returns the screen afterwards."""
-        hits = matching_windows(redacted(hypr_json("clients")), query)
+        agent = split_monitors(hypr_json("monitors"))[1]
+        hits = sorted(matching_windows(redacted(hypr_json("clients")), query), key=lambda c: on_agent(c, agent))
         if not hits:
             raise ValueError(f"no window matches {query!r}; call list_windows")
         w = hits[0]
         if w.get("denied"):
             raise refused(f"Refused: '{w.get('class')}' is on the deny-list. Ask the user.")
+        if on_agent(w, agent):
+            raise ValueError(f"{w['class']} is on the agent display, and focusing it would take the user's keyboard "
+                             "and pointer there. Use key or type_text with window=, click, or ui_act.")
         guard(target=window_target(w))
         dispatch("focus", {"window": "address:" + w["address"]})
         mark_input("focus")
         return f"focused {w['class']} — {w['title']} (workspace {w['workspace']['name']})"
 
     @tool(extra=True)
-    def launch_app(name: str, screenshot: bool = False):
+    def launch_app(name: str, where: str = "", screenshot: bool = False):
         """Start an installed desktop app by name or desktop id, e.g. 'Chromium', 'foot',
         'org.gnome.Nautilus'. It opens on the current workspace, with its accessibility tree on.
+        where: "agent" (the agent display; the default while it's on) or "user".
         screenshot=true returns the screen afterwards."""
+        where = where_to_open(where)
         apps = desktop_entries()
         did = apps.get(name.lower())
         if did is None:
@@ -1739,36 +2138,49 @@ def build_server():
             raise ValueError(f"no installed app named {name!r}" + (f"; did you mean: {', '.join(close)}" if close else ""))
         path = desktop_file(did)
         cmd = desktop_execs(path).get("") if path else None
-        guard(target=(f"'{did}'", app_names(did, cmd)))
+        guard(target=(f"'{did}'", app_names(did, cmd)), background=where == "agent")
         if not (cmd and any(k in os.path.basename(cmd[0]) for k in CHROMIUM_FAMILY)):
             if shutil.which("gtk-launch") is None:
                 raise RuntimeError("gtk-launch is not installed (it comes with GTK 3)")
             cmd = ["gtk-launch", did]
-        dispatch("exec_cmd", with_a11y(cmd))
+        rules = [{"workspace": AGENT_WORKSPACE + " silent"}] if where == "agent" else []
+        dispatch("exec_cmd", with_a11y(cmd), *rules)
         mark_input("launch")
-        return f'launched {did}; wait_for(event="window") returns once it has opened'
+        look_at(where)
+        return (f"launched {did}" + (" on the agent display" if where == "agent" else "")
+                + '; wait_for(event="window") returns once it has opened')
 
     @tool(open_world=True, extra=True)
-    def open_url(url: str, private: bool = False, wait_ms: int = 8000, screenshot: bool = True):
+    def open_url(url: str, private: bool = False, wait_ms: int = 8000, where: str = "", screenshot: bool = True):
         """Open a web page in the default browser, in one call; private=true uses a private /
         incognito window. Waits (up to wait_ms) for the page's window, then returns a
-        screenshot. Much faster than launching the browser and typing into the address bar."""
+        screenshot. Much faster than launching the browser and typing into the address bar.
+        where as for launch_app; on the agent display the browser has a profile of its own."""
+        where = where_to_open(where)
         url = checked_url(url)
         cmd, names = browser_command(private)
-        guard(target=(f"the browser '{names[0]}'", names))
-        cmd = with_a11y(cmd + [url])
-        before = active_window_key()
-        dispatch("exec_cmd", cmd)
-        EVENTS.wait(lambda: page_ready(before, active_window_key()), max(0, min(15000, int(wait_ms))) / 1000)
+        guard(target=(f"the browser '{names[0]}'", names), background=where == "agent")
+        wait_s = max(0, min(15000, int(wait_ms))) / 1000
+        if where == "agent":
+            before = agent_titles()
+            dispatch("exec_cmd", with_a11y(own_profile(cmd) + [url]), {"workspace": AGENT_WORKSPACE + " silent"})
+            EVENTS.wait(lambda: agent_page_ready(before), wait_s)
+        else:
+            before_key = active_window_key()
+            dispatch("exec_cmd", with_a11y(cmd + [url]))
+            EVENTS.wait(lambda: page_ready(before_key, active_window_key()), wait_s)
         mark_input("open_url")
-        return f"opened {url}" + (" in a private window" if private else "")
+        look_at(where)
+        return (f"opened {url}" + (" in a private window" if private else "")
+                + (" on the agent display" if where == "agent" else ""))
 
     @tool(read_only=True, extra=True)
-    def find_text(query: str, window: str = "") -> str:
+    def find_text(query: str, window: str = "", target: str = "") -> str:
         """Find text on screen by OCR: up to 20 matches of query (case-insensitive), top to bottom,
         each with its centre and box in screenshot pixels and the window it's in. window: read only
-        the window whose class or title contains this. Cheaper than a screenshot to locate a label."""
-        hits, note = read_text(text_pattern(query), window)
+        the window whose class or title contains this. Cheaper than a screenshot to locate a label.
+        target as for screenshot."""
+        hits, note = read_text(text_pattern(query), window, look_at(target))
         return describe_hits(hits, query, note)
 
     @tool(destructive=True, extra=True)
@@ -1789,7 +2201,7 @@ def build_server():
         clients, monitors = hypr_json("clients"), hypr_json("monitors")
         w = a11y_target(clients, window)
         out = a11y(a11y_request(w, monitors, op="find", query=query.strip(), role=role.strip(), limit=TEXT_ROWS))
-        lay, shown = layout_from_monitors(monitors), on_screen(w, monitors)
+        lay, shown = view_region(monitors, look_at(display_of(w, monitors)))[0], on_screen(w, monitors)
         rows = [element_line(remember(w, row), row if shown else {**row, "centre": None}, w, lay)
                 for row in out["rows"]]
         where = f'{w["class"]} "{clip(w["title"])}"' + ("" if shown else
@@ -1814,7 +2226,8 @@ def build_server():
             raise ValueError(f"unknown ref {ref!r}; call ui_find for current refs")
         clients, monitors = hypr_json("clients"), hypr_json("monitors")
         w = a11y_target(clients, address=known["address"])
-        guard(target=window_target(w))
+        where = display_of(w, monitors)
+        guard(target=window_target(w), background=where == "agent")
         out = a11y(a11y_request(w, monitors, op="act", path=known["path"], role=known["role"], name=known["name"],
                                 action=action.strip()))
         known["path"] = out["path"]
@@ -1822,33 +2235,48 @@ def build_server():
             if not out["click"] or not on_screen(w, monitors):
                 raise RuntimeError(f'the {known["role"]} has no action of its own, and its position on screen '
                                    "isn't known; focus_window its window first, or use find_text")
-            lay = layout_from_monitors(monitors)
+            lay = view_region(monitors, look_at(where))[0]
             return act_click(*lay.to_shot(w["at"][0] + out["click"][0], w["at"][1] + out["click"][1]))
         mark_input("click")
         if not on_screen(w, monitors):
             out["centre"] = None
         if out.get("gone"):
             return f'Did "{out["did"]}" on {ref}, which is gone now (the window changed)'
-        return f'Did "{out["did"]}" on ' + element_line(ref, out, w, layout_from_monitors(monitors), named=False)
+        return f'Did "{out["did"]}" on ' + element_line(ref, out, w, view_region(monitors, look_at(where))[0],
+                                                        named=False)
 
     @tool(read_only=True)
     def cursor_position() -> str:
         """Current pointer position, in screenshot pixels."""
-        return str(pointer_shot())
+        return str(pointer_shot()) + (" on the user's screen" if _view == "agent" else "")
 
     @tool(read_only=True)
     def list_windows() -> str:
         """Open windows: workspace, class, title and bounding box in screenshot pixels."""
-        lay = current_layout()
-        f = lay.factor
+        monitors = hypr_json("monitors")
         out = []
         for c in redacted(hypr_json("clients")):
+            where = display_of(c, monitors)
+            lay = view_region(monitors, where)[0]
             (x, y), (w, h) = c["at"], c["size"]
             sx, sy = lay.to_shot(x, y)
             title = HIDDEN_TITLE if c.get("denied") else c["title"]
-            out.append(f"[ws {c['workspace']['name']}] {c['class']} — {title} "
-                       f"@ ({sx}, {sy}) {round(w * f)}x{round(h * f)}")
+            place = "agent display" if where == "agent" else f"ws {c['workspace']['name']}"
+            f = lay.factor
+            out.append(f"[{place}] {c['class']} — {title} @ ({sx}, {sy}) {round(w * f)}x{round(h * f)}")
         return "\n".join(out) or "no windows"
+
+    @tool(extra=True)
+    def agent_display(action: str = "status") -> str:
+        """A screen of your own, so the user can keep using theirs: action "start", "stop" or "status".
+        While it's on, launch_app and open_url open apps there, unseen by the user, and screenshot,
+        zoom, find_text and clicks act there until you pass target="user". Type with type_text or
+        key and window=. A click there borrows the user's pointer for a moment, once they leave
+        mouse and keyboard alone. "stop" parks its windows out of sight; "start" brings them back."""
+        actions = {"start": start_agent_display, "stop": stop_agent_display, "status": agent_display_status}
+        if action not in actions:
+            raise ValueError('action must be "start", "stop" or "status"')
+        return actions[action]()
 
     return mcp
 
@@ -2035,4 +2463,9 @@ if __name__ == "__main__":
     _unconfined = confine()
     if _unconfined:
         print(f"hypr-computer: the network is not blocked: {_unconfined}", file=sys.stderr)
-    build_server().run()
+    # A thread waiting on stdin keeps a normal exit waiting, so a SIGTERM cleans up and leaves at once.
+    signal.signal(signal.SIGTERM, lambda *_: (shutdown(), os._exit(0)))
+    try:
+        build_server().run()
+    finally:
+        shutdown()

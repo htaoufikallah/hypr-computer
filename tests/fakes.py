@@ -12,12 +12,36 @@ M1_PANEL = {"id": 0, "name": "eDP-1", "x": 0, "y": 0, "width": 2560, "height": 1
             "transform": 0, "activeWorkspace": {"id": 9, "name": "9"}}
 
 
+def lua_table(text: str) -> dict:
+    """The fields of a flat Lua table literal, such as `{output = "x", scale = 1, default = true}`."""
+    def value(v: str):
+        if v.startswith('"'):
+            return re.sub(r"\\(\d{3})", lambda m: chr(int(m[1])), v[1:-1])
+        return {"true": True, "false": False}[v] if v in ("true", "false") else json.loads(v)
+    nested = {k: lua_table(v) for k, v in re.findall(r"(\w+) = (\{[^{}]*\})", text)}
+    flat = re.sub(r"\w+ = \{[^{}]*\}", "", text[1:-1] if text.startswith("{") else text)
+    return {**{k: value(v) for k, v in re.findall(r'(\w+) = ("(?:[^"\\]|\\.)*"|[^,}\s]+)', flat)}, **nested}
+
+
+def named_workspace(name: str) -> dict:
+    """A named or special workspace as Hyprland 0.57 describes it: with no id."""
+    return {"address": name, "type": "special" if name.startswith("special:") else "normal", "name": name}
+
+
 class FakeHyprland:
     """Hyprland 0.57's IPC socket: one request per connection, written as `flags/command`
     (`j/clients`, `/dispatch hl.dsp...`), answered with JSON, `ok` or `error: ...`.
     Its event socket sends `name>>data` lines to every reader, with addresses lacking the `0x`
     that `j/clients` gives them, as 0.57.2 does. With `warps`, focusing a window moves the pointer to its
-    middle, as Hyprland does unless `cursor:no_warps` is set."""
+    middle, as Hyprland does unless `cursor:no_warps` is set.
+
+    Headless outputs come and go as measured on the M1: one takes the size and place of its `hl.monitor` rule
+    and shows the workspace its `hl.workspace_rule` makes the default; removing it leaves its windows on the
+    first monitor and the pointer in that monitor's bottom right corner. Warping the pointer onto another
+    monitor focuses that monitor and the window under the pointer; focusing a monitor puts the pointer in its
+    middle and focuses its most recently focused window. `keys` is what the `input.keyboard.key` counter the
+    server installs has counted, None until it is installed. `activate` is a window asking to be focused, which
+    Hyprland grants with `misc:focus_on_activate`, as Omarchy sets it, unless a window rule says otherwise."""
 
     def __init__(self, monitors=None, clients=None, active=None):
         self.root = tempfile.mkdtemp(prefix="hc", dir="/tmp")  # AF_UNIX paths max out at 108 bytes
@@ -25,6 +49,11 @@ class FakeHyprland:
         self.clients = clients or []
         self.active = active or {}
         self.cursor = (0, 0)
+        self.focused = self.monitors[0]["name"]
+        self.rules: dict[str, dict] = {}
+        self.workspace_rules: list[dict] = []
+        self.window_rules: dict[str, dict] = {}
+        self.keys: int | None = None
         self.warps = False
         self.binds: list[dict] = []
         self.animations = [[{"name": "global", "overridden": True, "enabled": True, "speed": 1.0}], []]
@@ -64,19 +93,113 @@ class FakeHyprland:
                 self.on_request(request)
                 conn.sendall(self.reply(request).encode())
 
+    def monitor_at(self, x: float, y: float) -> dict | None:
+        return next((m for m in self.monitors if m["x"] <= x < m["x"] + m["width"] / m["scale"]
+                     and m["y"] <= y < m["y"] + m["height"] / m["scale"]), None)
+
+    def window_at(self, x: float, y: float, monitor: dict) -> dict:
+        shown = monitor["activeWorkspace"]["name"]
+        return next((c for c in self.clients if (c.get("workspace") or {}).get("name") == shown
+                     and c["at"][0] <= x < c["at"][0] + c["size"][0] and c["at"][1] <= y < c["at"][1] + c["size"][1]), {})
+
+    def output(self, request: str) -> str:
+        verb, *rest = request.split()[1:]
+        name = rest[-1]
+        if verb == "create":
+            rule = self.rules.get(name, {"mode": "1920x1080", "position": "auto"})
+            w, h = map(int, rule["mode"].split("x"))
+            right = max(m["x"] + m["width"] / m["scale"] for m in self.monitors)
+            x, y = (right, 0) if rule["position"] == "auto" else map(int, rule["position"].split("x"))
+            ws = next((r["workspace"].removeprefix("name:") for r in self.workspace_rules
+                       if r.get("monitor") == name and r.get("default")), name)
+            m = {"id": max(m["id"] for m in self.monitors) + 1, "name": name, "x": x, "y": y, "width": w,
+                 "height": h, "scale": float(rule.get("scale", 1)), "transform": 0,
+                 "activeWorkspace": named_workspace(ws), "specialWorkspace": named_workspace("")}
+            self.monitors = self.monitors + [m]
+            for c in self.clients:
+                if (c.get("workspace") or {}).get("name") == ws:
+                    c["monitor"] = m["id"]
+        else:
+            gone = next(m for m in self.monitors if m["name"] == name)
+            self.monitors = [m for m in self.monitors if m is not gone]
+            first = self.monitors[0]
+            for c in self.clients:
+                if c.get("monitor") == gone["id"]:
+                    c["monitor"] = first["id"]
+            self.cursor = (first["x"] + first["width"] / first["scale"] - 1,
+                           first["y"] + first["height"] / first["scale"] - 1)
+            self.focused = first["name"]
+        return "ok"
+
+    def eval(self, code: str) -> str:
+        if code.startswith("hl.monitor("):
+            rule = self.rules[lua_table(code)["output"]] = lua_table(code)
+            for m in self.monitors:
+                if m["name"] == rule["output"]:
+                    m["width"], m["height"] = map(int, rule["mode"].split("x"))
+                    m["x"], m["y"] = map(int, rule["position"].split("x"))
+                    m["scale"] = float(rule.get("scale", 1))
+        elif code.startswith("hl.workspace_rule("):
+            self.workspace_rules.append(lua_table(code))
+        elif code.startswith("hl.window_rule("):
+            rule = lua_table(code)
+            self.window_rules[rule["name"]] = rule
+        elif code.startswith("if not HYPR_COMPUTER_KEYS"):
+            self.keys = 0 if self.keys is None else self.keys
+        elif code.startswith("if HYPR_COMPUTER_KEYS_SUB"):
+            self.keys = None
+        else:
+            return f"error: unknown Lua {code!r}"
+        return "ok"
+
+    def activate(self, w: dict) -> None:
+        ruled = [r for r in self.window_rules.values() if r.get("enabled", True)
+                 and r.get("match", {}).get("workspace", "").removeprefix("name:") == w["workspace"]["name"]]
+        if all(r.get("focus_on_activate", True) for r in ruled):
+            self.active, self.cursor = w, (w["at"][0] + w["size"][0] // 2, w["at"][1] + w["size"][1] // 2)
+            self.focused = next(m["name"] for m in self.monitors if m["id"] == w["monitor"])
+
+    def dispatch(self, name: str, args: dict) -> None:
+        if name == "cursor.move":
+            was = self.monitor_at(*self.cursor)
+            self.cursor = (args["x"], args["y"])
+            now = self.monitor_at(*self.cursor)
+            if now is not None and now is not was:
+                self.focused = now["name"]
+                self.active = self.window_at(*self.cursor, now) or self.active
+        elif name == "focus" and "monitor" in args:
+            m = next(m for m in self.monitors if m["name"] == args["monitor"])
+            self.focused = m["name"]
+            self.cursor = (m["x"] + m["width"] / m["scale"] / 2, m["y"] + m["height"] / m["scale"] / 2)
+            shown = [c for c in self.clients if (c.get("workspace") or {}).get("name") == m["activeWorkspace"]["name"]]
+            self.active = min(shown, key=lambda c: c.get("focusHistoryID", 99), default={})
+        elif name == "focus" and "window" in args:
+            w = next((c for c in self.clients if "address:" + c.get("address", "") == args["window"]), None)
+            if w and self.warps:
+                self.active, self.cursor = w, (w["at"][0] + w["size"][0] // 2, w["at"][1] + w["size"][1] // 2)
+        elif name == "window.move":
+            w = next(c for c in self.clients if "address:" + c["address"] == args["window"])
+            ws = args["workspace"].removeprefix("name:")
+            w["workspace"] = named_workspace(ws)
+            w["monitor"] = next((m["id"] for m in self.monitors if m["activeWorkspace"]["name"] == ws),
+                                next(m["id"] for m in self.monitors if m["name"] == self.focused))
+
     def reply(self, request: str) -> str:
-        answers = {"j/monitors": self.monitors, "j/clients": self.clients, "j/activewindow": self.active,
+        if request.startswith("/output "):
+            return self.output(request)
+        if request.startswith("/eval "):
+            return self.eval(request[len("/eval "):])
+        if request == "/repl return HYPR_COMPUTER_KEYS":
+            return "nil" if self.keys is None else str(self.keys)
+        monitors = [{**m, "focused": m["name"] == self.focused} for m in self.monitors]
+        answers = {"j/monitors": monitors, "j/clients": self.clients, "j/activewindow": self.active,
                    "j/cursorpos": {"x": self.cursor[0], "y": self.cursor[1]}, "j/version": {"version": "0.57.2"},
                    "j/animations": self.animations, "j/binds": self.binds}
         if request in answers:
             return json.dumps(answers[request])
-        move = re.fullmatch(r"/dispatch hl\.dsp\.cursor\.move\(\{x = (-?\d+), y = (-?\d+)\}\)", request)
-        if move:
-            self.cursor = (int(move[1]), int(move[2]))
-        focus = re.fullmatch(r'/dispatch hl\.dsp\.focus\(\{window = "address:(\w+)"\}\)', request)
-        w = next((c for c in self.clients if focus and c.get("address") == focus[1]), None)
-        if w and self.warps:
-            self.active, self.cursor = w, (w["at"][0] + w["size"][0] // 2, w["at"][1] + w["size"][1] // 2)
+        call = re.fullmatch(r"/dispatch hl\.dsp\.([\w.]+)\((\{.*\})?.*\)", request, re.S)
+        if call:
+            self.dispatch(call[1], lua_table(call[2] or ""))
         if request.startswith(("/dispatch hl.dsp.", "/notify ")):
             return "ok"
         return f"error: unknown request {request!r}"
@@ -149,25 +272,65 @@ class FakeInput:
 
 
 FAKE_GRIM = r'''#!/usr/bin/env python3
-"""grim that only captures at full resolution: `grim -t ppm -`. FAKE_GRIM_SIZE=WxH and
-FAKE_GRIM_MARK=x,y,side[;x,y,side...] draw white squares at physical pixels on a dark screen.
-FAKE_GRIM_MOVING=file,n moves them right on each of the first n captures, counted in file."""
-import os, sys
-if sys.argv[1:] != ["-t", "ppm", "-"]:
-    sys.exit(f"fake grim: unsupported arguments {sys.argv[1:]}")
-w, h = map(int, os.environ["FAKE_GRIM_SIZE"].split("x"))
-marks = [tuple(map(int, m.split(","))) for m in os.environ["FAKE_GRIM_MARK"].split(";") if m]
-shift = 0
-if os.environ.get("FAKE_GRIM_MOVING"):
-    path, n = os.environ["FAKE_GRIM_MOVING"].split(",")
-    shots = int(open(path).read() or 0) if os.path.exists(path) else 0
-    open(path, "w").write(str(shots + 1))
-    shift = min(shots, int(n))
-px = bytearray(b"\x20" * (w * h * 3))
-for mx, my, side in marks:
-    mx += side * shift
-    for row in range(my, my + side):
-        px[(row * w + mx) * 3:(row * w + mx + side) * 3] = b"\xff" * (side * 3)
+"""grim that only captures at full resolution: `grim [-o OUTPUT | -g "X,Y WxH"] -t ppm -`. The user's monitor,
+the first one Hyprland lists, is FAKE_GRIM_SIZE=WxH, with white squares on a dark screen at physical pixels
+FAKE_GRIM_MARK=x,y,side[;x,y,side...]; `-g` must ask for exactly that monitor. `-o` of another output draws
+FAKE_GRIM_OUTPUT_MARK on it. Without -o or -g, real grim captures the box around every monitor, so with more
+than one this fails rather than draw an image that size. FAKE_GRIM_MOVING=file,n moves the user's squares
+right on each of the first n captures, counted in file."""
+import json, os, socket, sys
+args = sys.argv[1:]
+if args[-3:] != ["-t", "ppm", "-"] or len(args) not in (3, 5) or (len(args) == 5 and args[0] not in ("-o", "-g")):
+    sys.exit(f"fake grim: unsupported arguments {args}")
+
+
+def monitors():
+    env = os.environ
+    path = os.path.join(env.get("XDG_RUNTIME_DIR", ""), "hypr", env.get("HYPRLAND_INSTANCE_SIGNATURE", ""),
+                        ".socket.sock")
+    try:
+        with socket.socket(socket.AF_UNIX) as s:
+            s.connect(path)
+            s.sendall(b"j/monitors")
+            s.shutdown(socket.SHUT_WR)
+            return json.loads(b"".join(iter(lambda: s.recv(65536), b"")))
+    except OSError:
+        return []
+
+
+def screen(w, h, marks, shift=0):
+    px = bytearray(b"\x20" * (w * h * 3))
+    for mx, my, side in marks:
+        mx += side * shift
+        for row in range(my, my + side):
+            px[(row * w + mx) * 3:(row * w + mx + side) * 3] = b"\xff" * (side * 3)
+    return w, h, px
+
+
+def marks(var):
+    return [tuple(map(int, m.split(","))) for m in os.environ.get(var, "").split(";") if m]
+
+
+mons = monitors()
+user = mons[0] if mons else None
+if args[0] == "-o" and user and args[1] != user["name"]:
+    out = next(m for m in mons if m["name"] == args[1])
+    w, h, px = screen(out["width"], out["height"], marks("FAKE_GRIM_OUTPUT_MARK"))
+else:
+    if args[0] == "-g":
+        want = "{:.0f},{:.0f} {:.0f}x{:.0f}".format(user["x"], user["y"], user["width"] / user["scale"],
+                                                    user["height"] / user["scale"])
+        if args[1] != want:
+            sys.exit(f"fake grim: -g {args[1]!r} is not the user's monitor {want!r}")
+    elif args[0] == "-t" and len(mons) > 1:
+        sys.exit(f"fake grim: capturing every monitor would cover {[m['name'] for m in mons]} and the gaps between")
+    shift = 0
+    if os.environ.get("FAKE_GRIM_MOVING"):
+        path, n = os.environ["FAKE_GRIM_MOVING"].split(",")
+        shots = int(open(path).read() or 0) if os.path.exists(path) else 0
+        open(path, "w").write(str(shots + 1))
+        shift = min(shots, int(n))
+    w, h, px = screen(*map(int, os.environ["FAKE_GRIM_SIZE"].split("x")), marks("FAKE_GRIM_MARK"), shift)
 sys.stdout.buffer.write(b"P6\n%d %d\n255\n" % (w, h) + px)
 '''
 
