@@ -111,7 +111,8 @@ class FakeDesktop:
     def __init__(self, tmp_path, monitor=M1_PANEL, mark=(0, 0, 1), **env):
         self.hypr = FakeHyprland(monitors=[monitor])
         s = monitor["scale"]
-        self.session = Session(**self.hypr.env, **env, PATH=f"{fake_bin(str(tmp_path / 'bin'))}:{os.environ['PATH']}",
+        self.session = Session(**self.hypr.env, **{"HYPR_COMPUTER_WORKSPACE": "user", **env},
+                               PATH=f"{fake_bin(str(tmp_path / 'bin'))}:{os.environ['PATH']}",
                                FAKE_GRIM_SIZE=f"{monitor['width']}x{monitor['height']}",
                                FAKE_GRIM_MARK=",".join(str(round(v * s)) for v in mark),
                                HYPR_COMPUTER_SETTLE_MS="0")
@@ -182,13 +183,15 @@ def test_open_url_opens_files_only_under_the_listed_folders(tmp_path):
 
 @needs_uv
 @pytest.mark.parametrize("exit_by", ["closing stdin", "SIGTERM"])
-def test_the_server_turns_off_the_agent_display_it_started_when_it_exits(tmp_path, exit_by):
+def test_the_server_turns_off_the_agent_display_it_started_and_its_live_view_when_it_exits(tmp_path, exit_by):
     d = FakeDesktop(tmp_path)
     try:
         assert not d.call("agent_display", action="start")[0]
+        (view,) = d.hypr.processes
         proc = d.session.proc
         proc.stdin.close() if exit_by == "closing stdin" else proc.terminate()
         proc.wait(timeout=30)
+        view.wait(timeout=5)
     finally:
         d.close()
     assert "/output remove hypr-computer" in d.hypr.requests

@@ -6,7 +6,7 @@ import time
 import pytest
 
 import server
-from fakes import M1_PANEL, jpeg_size
+from fakes import M1_PANEL, fake_bin, jpeg_size, named_workspace
 from test_containment import allow
 from test_perception import client, gray, later
 
@@ -93,10 +93,11 @@ def test_stop_parks_its_windows_and_puts_the_users_pointer_back_and_start_brings
 def test_a_display_left_on_by_an_earlier_server_is_found_by_its_name(user):
     user.call("agent_display", action="start")
     server._started = False  # a new server
-    assert user.call("agent_display", action="status").endswith("left on by an earlier session; start takes it over.")
+    assert "with no windows yet, left on by an earlier session; start takes it over." in user.call(
+        "agent_display", action="status")
     user.call("agent_display", action="start")
     assert len([r for r in user.hypr.requests if r.startswith("/output create")]) == 1
-    assert user.call("agent_display", action="status").endswith("with no windows yet.")
+    assert "with no windows yet. The user" in user.call("agent_display", action="status")
 
 
 def test_screenshots_show_the_display_asked_for_and_later_ones_stay_on_it(agent, screen, monkeypatch):
@@ -222,7 +223,7 @@ def test_background_input_follows_the_grant_the_deny_list_and_the_stop_switch(ag
     assert not agent.hypr.dispatched("send_shortcut")
 
 
-def test_the_user_using_the_mouse_doesnt_pause_work_on_the_agent_display(user):
+def test_the_user_using_the_mouse_doesnt_pause_work_on_the_agent_display(user, screen):
     user.call("click", x=100, y=100)
     user.hypr.cursor = (500, 300)  # the user takes the mouse
     user.call("agent_display", action="start")
@@ -231,6 +232,7 @@ def test_the_user_using_the_mouse_doesnt_pause_work_on_the_agent_display(user):
     out = user.call("batch", screenshot=False,
                     steps=[{"action": "key", "combo": "Return", "window": "foot"}, {"action": "wait", "ms": 0}])
     assert "Stopped" not in out and len(user.hypr.dispatched("send_shortcut")) == 3
+    user.call("screenshot", target="user")
     with pytest.raises(Exception, match="The user is using the mouse"):
         user.call("key", combo="a")  # into the focused window: the user's
 
@@ -309,7 +311,8 @@ def test_the_pointer_tools_and_focus_window_keep_off_the_agent_display(agent):
             agent.call(tool, **args)
     with pytest.raises(Exception, match="foot is on the agent display"):
         agent.call("focus_window", query="agent shell")
-    assert agent.call("focus_window", query="foot").startswith("focused foot — ~/notes")
+    with pytest.raises(Exception, match="foot is on the user's screen"):
+        agent.call("focus_window", query="notes")
     assert not agent.hypr.dispatched("cursor.move") and agent.input.events == []
 
 
@@ -318,3 +321,201 @@ def test_while_the_agent_display_is_off_nothing_changes_for_the_users_screen(use
     assert user.call("list_windows") == "[ws 9] foot — ~/notes @ (0, 0) 1280x800"
     user.call("click", x=100, y=100)
     assert user.hypr.monitors == [M1_PANEL] and not user.hypr.dispatched("send_shortcut")
+
+
+# Working on its own display, the default (HYPR_COMPUTER_WORKSPACE=agent): the user watches it on workspace 10.
+WATCH = "workspace 10 (Super+0)"
+
+
+@pytest.fixture
+def own(user, tmp_path, monkeypatch):
+    """A fresh agent, by default, with wl-mirror installed."""
+    monkeypatch.delenv("HYPR_COMPUTER_WORKSPACE")
+    monkeypatch.setattr(server, "WL_MIRROR", os.path.join(fake_bin(str(tmp_path / "view")), "wl-mirror"))
+    return user
+
+
+def views(desktop) -> list[dict]:
+    return [c for c in desktop.hypr.clients if c["class"] == "at.yrlf.wl_mirror"]
+
+
+def notices(desktop) -> list[str]:
+    return [r for r in desktop.hypr.requests if r.startswith("/notify ")]
+
+
+@pytest.mark.parametrize("tool, args, did", [
+    ("launch_app", {"name": "foot"}, "launched foot on the agent display"),
+    ("open_url", {"url": "https://example.com", "wait_ms": 0, "screenshot": False},
+     "opened https://example.com on the agent display")])
+def test_the_first_app_or_page_opens_on_the_agent_display_which_starts_with_a_live_view(own, apps, monkeypatch,
+                                                                                         tool, args, did):
+    monkeypatch.setenv("HYPR_COMPUTER_BROWSER", "chromium")
+    out = own.call(tool, **args)
+    assert out.startswith(did) and "Started the agent display" in out and f"The user can watch it on {WATCH}." in out
+    assert [m["name"] for m in own.hypr.monitors] == ["eDP-1", "hypr-computer"]
+    assert own.hypr.dispatched("exec_cmd")[-1].endswith(SILENTLY_THERE)
+    (view,) = views(own)
+    assert view["workspace"]["name"] == "10" and view["monitor"] == M1_PANEL["id"]
+    assert users_seat(own) == ((600, 500), USER_FOOT, "eDP-1")
+    assert own.hypr.monitors[0]["activeWorkspace"]["name"] == "9"
+    (notice,) = notices(own)
+    assert f"working on its own workspace (hypr-computer). Watch it on {WATCH}. To stop it" in notice
+
+
+def test_a_first_screenshot_shows_the_agent_display_until_the_agent_asks_for_the_users_screen(own, screen):
+    text = own.result("screenshot")[0]
+    assert text.startswith("Screenshot 1280x800 px of the agent display.") and "Started the agent display" in text
+    assert own.result("screenshot", target="user")[0].startswith("Screenshot 1280x800 px (desktop")
+    assert own.result("screenshot")[0].startswith("Screenshot 1280x800 px (desktop")
+
+
+def test_the_live_view_opens_once_off_the_agent_display_and_closes_when_the_display_stops(own):
+    own.call("agent_display", action="start")
+    assert own.call("agent_display", action="start").endswith(f"The user can watch it on {WATCH}.")
+    (view,) = views(own)
+    (proc,) = own.hypr.processes
+    assert own.hypr.window_rules["hypr-computer-view"] | {"name": None} == {
+        "name": None, "match": {"class": "at.yrlf.wl_mirror", "title": view["title"]}, "no_initial_focus": True,
+        "focus_on_activate": False}
+    assert own.call("list_windows").splitlines() == [
+        "[ws 9] foot — ~/notes @ (0, 0) 1280x800",
+        "[ws 10] at.yrlf.wl_mirror — hypr-computer: live view of the agent display @ (0, 0) 1280x800"]
+    assert own.call("agent_display", action="status") == ("The agent display is on: 1280x800, with no windows yet. "
+                                                         f"The user can watch it on {WATCH}.")
+    own.call("agent_display", action="stop")
+    assert proc.wait(timeout=5) is not None
+    assert own.call("list_windows") == "[ws 9] foot — ~/notes @ (0, 0) 1280x800"
+
+
+def test_hypr_computer_watch_shows_the_live_views_workspace_and_reopens_a_closed_view(own, monkeypatch, capsys):
+    monkeypatch.setenv("HYPR_COMPUTER_VIEW_WORKSPACE", "7")
+    assert server.watch_command() == 1 and "No agent is working on its own display" in capsys.readouterr().out
+    assert "watch it on workspace 7 (Super+7)" in own.call("agent_display", action="start")
+    assert own.hypr.monitors[0]["activeWorkspace"]["name"] == "9"
+    own.hypr.processes[0].kill()  # the user closed the view
+    own.hypr.processes[0].wait()
+    assert "its live view is closed" in own.call("agent_display", action="status")
+    assert server.watch_command() == 0
+    assert len(views(own)) == 1 and own.hypr.monitors[0]["activeWorkspace"]["name"] == "7"
+
+
+def test_without_wl_mirror_the_agent_display_works_and_says_how_to_watch_it(own, monkeypatch):
+    monkeypatch.setattr(server, "WL_MIRROR", os.path.join(own.hypr.root, "no-wl-mirror"))
+    assert own.call("agent_display", action="start") == (
+        "The agent display is on: 1280x800, with no windows yet. "
+        "The user can't watch it: wl-mirror is not installed (sudo pacman -S wl-mirror).")
+    assert len(own.hypr.monitors) == 2 and not own.hypr.dispatched("exec_cmd")
+    (notice,) = notices(own)
+    assert "working on its own workspace (hypr-computer). Install wl-mirror to watch it." in notice
+
+
+def test_the_self_check_looks_at_the_users_screen_and_calls_wl_mirror_optional(own, screen, monkeypatch, capsys):
+    server.self_check()
+    lines = capsys.readouterr().out.splitlines()
+    assert "PASS  wl-mirror (optional, watching the agent's workspace): " + server.WL_MIRROR in lines
+    assert any(line.startswith("PASS  screenshot") for line in lines)
+    assert own.hypr.monitors == [M1_PANEL] and not views(own)
+    monkeypatch.setattr(server, "WL_MIRROR", os.path.join(own.hypr.root, "no-wl-mirror"))
+    server.self_check()
+    (line,) = [x for x in capsys.readouterr().out.splitlines() if "  wl-mirror (" in x]
+    assert line.startswith("WARN  wl-mirror (optional") and line.endswith("Install: sudo pacman -S wl-mirror")
+
+
+def test_keys_without_window_go_to_the_agent_displays_window_never_the_users(own):
+    with pytest.raises(Exception, match="no window on the agent display yet"):
+        own.call("type_text", text="ls\n")
+    own.hypr.clients.append(agent_window("foot", "agent shell", "0xa"))
+    assert own.call("type_text", text="ls\n").startswith("typed 3 characters into foot on the agent display")
+    assert own.call("key", combo="ctrl+c").startswith("pressed ctrl+c in foot on the agent display")
+    own.call("batch", screenshot=False, steps=[{"action": "type", "text": "q"}, {"action": "key", "combo": "Return"}])
+    # l, s, Return, c and q are evdev keys 38, 31, 28, 46 and 16; Hyprland's codes are 8 higher
+    assert own.hypr.dispatched("send_shortcut") == [shortcut("", "code:46"), shortcut("", "code:39"),
+                                                    shortcut("", "code:36"), shortcut("CTRL", "code:54"),
+                                                    shortcut("", "code:24"), shortcut("", "code:36")]
+    assert own.input.events == [] and users_seat(own) == ((600, 500), USER_FOOT, "eDP-1")
+    own.hypr.clients.append(agent_window("chromium", "Example Domain - Chromium", "0xc"))
+    with pytest.raises(Exception, match=r"2 windows are on the agent display \(foot, chromium\), so pass window="):
+        own.call("type_text", text="rm -rf ~\n")
+    assert own.call("key", combo="Return", window="chromium").startswith("pressed Return in chromium")
+    assert len(own.hypr.dispatched("send_shortcut")) == 7
+
+
+def test_after_the_agent_turns_its_display_off_it_starts_again_only_when_asked(own, apps):
+    own.call("agent_display", action="start")
+    own.call("agent_display", action="stop")
+    with pytest.raises(Exception, match="You turned the agent display off"):
+        own.call("type_text", text="ls")
+    assert len(own.hypr.monitors) == 1
+    assert own.call("launch_app", name="foot").startswith("launched foot on the agent display")
+    assert len(own.hypr.monitors) == 2 and len(views(own)) == 1
+
+
+def test_a_refused_launch_leaves_the_agent_on_the_screen_it_saw_last(user, apps, screen, tmp_path):
+    (tmp_path / "applications" / "gedit.desktop").write_text("[Desktop Entry]\nName=Gedit\nExec=gedit\n")
+    user.call("agent_display", action="start")
+    user.call("screenshot", target="user")
+    allow("foot")
+    with pytest.raises(Exception, match="not 'gedit'"):
+        user.call("launch_app", name="gedit")
+    assert user.call("click", x=100, y=100).startswith("clicked left x1 at (100.0, 100.0)\n")
+    assert user.input.events == [("click", "left", 1)]
+
+
+def test_a_first_move_or_drag_starts_on_the_agent_display_so_the_users_pointer_stays_put(own):
+    for tool, args in (("move", {"x": 10, "y": 10}), ("drag", {"x1": 10, "y1": 10, "x2": 50, "y2": 50})):
+        with pytest.raises(Exception, match="works only on the user's screen"):
+            own.call(tool, **args)
+    assert not own.hypr.dispatched("cursor.move") and users_seat(own) == ((600, 500), USER_FOOT, "eDP-1")
+    assert own.hypr.monitors == [M1_PANEL]  # refusing needs no agent display
+
+
+def test_the_agent_acts_on_the_users_screen_only_once_it_asks_for_it(own, apps, screen, monkeypatch):
+    with pytest.raises(Exception, match=r"foot is on the user's screen.*ask the user first"):
+        own.call("focus_window", query="notes")
+    assert not [r for r in own.hypr.dispatched("focus") if "window" in r] and own.input.events == []
+    assert own.hypr.monitors == [M1_PANEL]
+    assert own.result("screenshot", target="user")[0].startswith("Screenshot 1280x800 px (desktop")
+    assert own.call("focus_window", query="notes").startswith("focused foot — ~/notes")
+    assert own.call("type_text", text="hi").startswith("typed 2 characters\n")
+    assert own.input.events == [("type", "hi")]
+    monkeypatch.setenv("HYPR_COMPUTER_BROWSER", "chromium")
+    assert own.call("open_url", url="https://example.com", where="user", wait_ms=0,
+                    screenshot=False).startswith("opened https://example.com\n")
+    assert own.hypr.dispatched("exec_cmd")[-1].endswith('https://example.com")')
+    assert own.call("launch_app", name="foot").startswith("launched foot on the agent display")
+
+
+def test_with_hypr_computer_workspace_user_the_agent_works_on_the_users_screen_as_before(user, apps, screen,
+                                                                                           monkeypatch, tmp_path):
+    monkeypatch.setenv("HYPR_COMPUTER_WORKSPACE", "user")
+    monkeypatch.setattr(server, "WL_MIRROR", os.path.join(fake_bin(str(tmp_path / "view")), "wl-mirror"))
+    monkeypatch.setenv("HYPR_COMPUTER_BROWSER", "chromium")
+    assert 'agent_display(action="start") gives you one of your own' in server.build_server().instructions
+    assert user.result("screenshot")[0].startswith("Screenshot 1280x800 px (desktop")
+    assert user.call("launch_app", name="foot").startswith("launched foot;")
+    assert user.call("open_url", url="https://example.com", wait_ms=0, screenshot=False).startswith(
+        "opened https://example.com\n")
+    user.call("key", combo="ctrl+l")
+    assert user.call("focus_window", query="notes").startswith("focused foot — ~/notes")
+    assert user.input.events == [("chord", (29, 38))]
+    assert user.hypr.monitors == [M1_PANEL] and not views(user) and not notices(user)[1:]
+    assert not any(SILENTLY_THERE in r for r in user.hypr.dispatched("exec_cmd"))
+
+
+def test_the_instructions_say_the_agent_works_on_its_own_workspace_and_asks_before_using_the_users(own):
+    said = " ".join(server.build_server().instructions.split())
+    assert ("You work on a screen of your own, the agent display, so you never take over the user's. "
+            f"They can watch it on {WATCH}.") in said
+    assert 'only when the task needs the user\'s own windows or logged-in apps, and ask the user first' in said
+
+
+@pytest.mark.parametrize("shown", ["hypr-computer", "21"])  # 21: what Hyprland 0.56 shows on a new output
+def test_the_live_view_is_blacked_out_while_a_password_manager_is_on_the_agent_display(own, screen, shown):
+    own.call("agent_display", action="start")
+    own.hypr.monitors[1]["activeWorkspace"] = named_workspace(shown)
+    assert server.watch_command() == 0  # the user watches the agent
+    assert gray(own.result("screenshot", target="user")[1][0], (110, 110))[0] > 200
+    vault = agent_window("org.keepassxc.KeePassXC", "Bank - KeePassXC", "0xk")
+    own.hypr.clients.append({**vault, "workspace": named_workspace(shown)})
+    text, (image,) = own.result("screenshot", target="user")
+    assert gray(image, (110, 110))[0] < 16 and "Black areas hide deny-listed windows" in text
