@@ -74,10 +74,10 @@ def test_parse_combo_rejects_unknown(bad):
 def test_us_table_covers_printable_ascii():
     for ch in map(chr, range(32, 127)):
         assert wl_input.VirtualInput.typeable(ch), ch
-    assert wl_input._US["A"] == (30, True)
-    assert wl_input._US["?"] == (53, True)
-    assert wl_input._US["/"] == (53, False)
-    assert wl_input._US["\n"] == (28, False)
+    assert wl_input.US_KEYS["A"] == (30, True)
+    assert wl_input.US_KEYS["?"] == (53, True)
+    assert wl_input.US_KEYS["/"] == (53, False)
+    assert wl_input.US_KEYS["\n"] == (28, False)
     assert not wl_input.VirtualInput.typeable("ü")
 
 
@@ -105,13 +105,13 @@ def test_deny_list_can_be_disabled(monkeypatch):
 
 def test_windows_at_point():
     clients = [
-        {"class": "a", "at": [0, 0], "size": [800, 600], "workspace": {"id": 1}},
-        {"class": "b", "at": [800, 0], "size": [800, 600], "workspace": {"id": 1}},
-        {"class": "c", "at": [0, 0], "size": [800, 600], "workspace": {"id": 2}},
+        {"class": "a", "at": [0, 0], "size": [800, 600], "workspace": {"id": 1, "name": "1"}},
+        {"class": "b", "at": [800, 0], "size": [800, 600], "workspace": {"id": 1, "name": "1"}},
+        {"class": "c", "at": [0, 0], "size": [800, 600], "workspace": {"id": 2, "name": "2"}},
     ]
-    assert [c["class"] for c in server.windows_at(clients, 100, 100, {1})] == ["a"]
-    assert [c["class"] for c in server.windows_at(clients, 900, 100, {1})] == ["b"]
-    assert server.windows_at(clients, 2000, 100, {1}) == []
+    assert [c["class"] for c in server.windows_at(clients, 100, 100, {"1"})] == ["a"]
+    assert [c["class"] for c in server.windows_at(clients, 900, 100, {"1"})] == ["b"]
+    assert server.windows_at(clients, 2000, 100, {"1"}) == []
 
 
 def test_session_env_forces_utf8(monkeypatch):
@@ -196,7 +196,7 @@ def test_stop_file_blocks_every_tool(desktop):
     open(desktop.hypr.stop_file, "w").close()
     sample = {"number": 10, "integer": 1, "string": "foot", "boolean": False, "array": []}
     tools = desktop.tools()
-    assert len(tools) == 19
+    assert len(tools) == 20
     not_blocked = []
     for t in tools:
         args = {k: sample[v["type"]] for k, v in t.inputSchema["properties"].items()
@@ -260,7 +260,7 @@ def test_every_action_tool_takes_screenshot_and_only_reads_are_read_only(desktop
     for t in desktop.tools():
         hints = t.annotations
         assert hints.readOnlyHint == (t.name in reads), t.name
-        if t.name not in reads - {"wait_for"}:
+        if t.name not in reads - {"wait_for"} | {"agent_display"}:
             assert t.inputSchema["properties"]["screenshot"]["type"] == "boolean", t.name
         if t.name not in reads:
             assert hints.destructiveHint == (t.name in {"click", "drag", "type_text", "key", "batch", "click_text",

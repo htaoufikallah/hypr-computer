@@ -15,7 +15,7 @@ CORE_TOOLS = {"screenshot", "click", "move", "drag", "scroll", "type_text", "key
               "list_windows"}
 TOOLS = {"screenshot", "click", "move", "drag", "scroll", "type_text", "key", "batch", "zoom",
          "focus_window", "launch_app", "open_url", "cursor_position", "list_windows", "wait_for",
-         "find_text", "click_text", "ui_find", "ui_act"}
+         "find_text", "click_text", "ui_find", "ui_act", "agent_display"}
 RESERVED_BY_CLAUDE_CODE = {"computer-use"}
 
 
@@ -178,6 +178,33 @@ def test_open_url_opens_files_only_under_the_listed_folders(tmp_path):
     (cmd,) = d.hypr.dispatched("exec_cmd")
     assert f"file://{www}/page.html" in cmd
     assert refused[0] and "HYPR_COMPUTER_FILE_URLS" in refused[1]
+
+
+@needs_uv
+@pytest.mark.parametrize("exit_by", ["closing stdin", "SIGTERM"])
+def test_the_server_turns_off_the_agent_display_it_started_when_it_exits(tmp_path, exit_by):
+    d = FakeDesktop(tmp_path)
+    try:
+        assert not d.call("agent_display", action="start")[0]
+        proc = d.session.proc
+        proc.stdin.close() if exit_by == "closing stdin" else proc.terminate()
+        proc.wait(timeout=30)
+    finally:
+        d.close()
+    assert "/output remove hypr-computer" in d.hypr.requests
+
+
+@needs_uv
+def test_a_server_leaves_an_agent_display_it_didnt_start(tmp_path):
+    d = FakeDesktop(tmp_path)
+    try:
+        d.hypr.reply("/output create headless hypr-computer")  # left on by an earlier server
+        assert "left on by an earlier session" in d.call("agent_display", action="status")[1]
+        d.session.proc.stdin.close()
+        d.session.proc.wait(timeout=30)
+    finally:
+        d.close()
+    assert not [r for r in d.hypr.requests if r.startswith("/output remove")]
 
 
 @needs_uv

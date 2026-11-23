@@ -10,16 +10,16 @@ import time
 BTN = {"left": 0x110, "right": 0x111, "middle": 0x112}
 XKB_MOD_INDEX = {29: 2, 97: 2, 42: 0, 54: 0, 56: 3, 100: 7, 125: 6, 126: 6}
 
-_US = {}
+US_KEYS = {}
 for row, codes in (("1234567890-=", list(range(2, 14))), ("qwertyuiop[]", list(range(16, 28))),
                    ("asdfghjkl;'`", list(range(30, 42))), ("\\zxcvbnm,./", [43] + list(range(44, 54)))):
     for ch, code in zip(row, codes):
-        _US[ch] = (code, False)
+        US_KEYS[ch] = (code, False)
 for low, up in zip("1234567890-=[];'`\\,./", "!@#$%^&*()_+{}:\"~|<>?"):
-    _US[up] = (_US[low][0], True)
+    US_KEYS[up] = (US_KEYS[low][0], True)
 for ch in "abcdefghijklmnopqrstuvwxyz":
-    _US[ch.upper()] = (_US[ch][0], True)
-_US.update({" ": (57, False), "\n": (28, False), "\t": (15, False)})
+    US_KEYS[ch.upper()] = (US_KEYS[ch][0], True)
+US_KEYS.update({" ": (57, False), "\n": (28, False), "\t": (15, False)})
 
 
 def us_keymap() -> bytes:
@@ -163,9 +163,9 @@ class VirtualInput:
 
     def type_ascii(self, text: str, delay: float = 0.006) -> None:
         for ch in text:
-            if ch not in _US:
+            if ch not in US_KEYS:
                 raise ValueError(f"cannot type {ch!r} with the virtual keyboard")
-            code, shift = _US[ch]
+            code, shift = US_KEYS[ch]
             if shift:
                 self._key(42, True)
             self._key(code, True)
@@ -178,4 +178,4 @@ class VirtualInput:
 
     @staticmethod
     def typeable(text: str) -> bool:
-        return all(ch in _US for ch in text)
+        return all(ch in US_KEYS for ch in text)

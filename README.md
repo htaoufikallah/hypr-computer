@@ -16,7 +16,7 @@ curl -fsSL malik-na.github.io/hypr-computer | bash
 
 You need Hyprland 0.55 or newer. The installer shows its plan and asks before it changes anything. It sets everything up, including your agents, and uses `sudo` only if a required package is missing.
 
-Then restart your agent and ask it something like *"Open github.com in a private window"*.
+Then restart your agent and ask it something like *"Open github.com in a private window"*. To keep using your screen while it works, ask it to use [its own display](docs/reference.md#the-agent-display).
 
 Using another agent, such as VS Code, Zed or Cline? See [Connecting your agent](docs/clients.md).
 

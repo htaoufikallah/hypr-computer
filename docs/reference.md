@@ -89,10 +89,34 @@ These are the tools your agent gets:
 | `launch_app` | Starts an installed app by name |
 | `list_windows` | Lists open windows with their workspace, title and position |
 | `cursor_position` | Reports where the pointer is |
+| `agent_display` | Gives the agent a screen of its own, so you can keep using yours. See [The agent display](#the-agent-display) |
 
 `find_text`, `click_text` and `wait_for` text read the screen with [tesseract](https://github.com/tesseract-ocr/tesseract), which you install yourself: `sudo pacman -S tesseract tesseract-data-eng` (on Debian or Ubuntu, `sudo apt install tesseract-ocr`). `ui_find` and `ui_act` need your system Python with `python-gobject` and `at-spi2-core`, which most desktops already have. `hypr-computer check` reports both as optional.
 
 Apps started with `launch_app` or `open_url` get their accessibility tree switched on (`ACCESSIBILITY_ENABLED=1`, `QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1`, and `--force-renderer-accessibility` for Chromium-based browsers). A browser that was already running keeps its old setting until you restart it. Terminals such as foot have no accessibility tree; `find_text` reads anything visible.
+
+### The agent display
+
+`agent_display(action="start")` adds a screen that only the agent uses, so it can work while you keep using your own. `action="stop"` removes it, and `action="status"` reports on it.
+
+- **What it is.** It's a virtual monitor, a Hyprland headless output named `hypr-computer`, showing a workspace of the same name. It's 1280x800 at scale 2, or narrower if you lower `HYPR_COMPUTER_MAX_EDGE`, so screenshots show it at full size and text on it is sharp enough to read. It sits 1,000 pixels above and to the left of your monitors, so your pointer can't wander onto it. Your monitors, workspaces, focus and pointer stay as they were. Apps on it can't take your focus, even when they ask to, as a browser does when it opens a page in a new tab.
+- **Opening apps.** While it's on, `launch_app` and `open_url` open apps on it, where you don't see them. With `where="user"` they open on your screen instead.
+- **A browser of its own.** On the agent display, `open_url` runs Chromium-based browsers and Firefox with a separate profile in `$XDG_RUNTIME_DIR/hypr-computer-browser`. The page doesn't open in your browser's window, and it doesn't get your logins. The profile is deleted when you log out. A `HYPR_COMPUTER_BROWSER` command that names its own profile keeps that profile.
+- **Seeing it.** `screenshot`, `zoom` and `find_text` take `target="agent"` or `target="user"`. Later calls stay on the display the agent saw last, and coordinates refer to it. `list_windows` marks the windows on the agent display. Password managers are blacked out there too.
+- **Typing.** `type_text` and `key` with `window=` type into a window on the agent display. Hyprland gives that window the keyboard for each key and then gives it back to your window, so your focus and pointer don't move. Your using the mouse doesn't pause this typing. Allowed apps and the deny-list apply to the window typed into.
+- **Clicking.** There's one pointer, so a click or a scroll on the agent display borrows yours. Once you've left the mouse and keyboard alone for 2 seconds, the agent moves the pointer there, clicks, and puts back the pointer and your keyboard focus. On the M1, your pointer is away for less than 20 ms. While you're using the mouse or keyboard, the click is refused, and the agent is told to use keys or `ui_act`. `move` and `drag` work only on your screen.
+- **Counting key presses.** To know when you're typing, the server adds a small handler to Hyprland that counts key presses, not which keys. Stopping the display removes it.
+- **Stopping.** Stopping moves the display's windows to the hidden workspace `special:hypr-computer`, and starting it again brings them back. To see these windows yourself, run `hyprctl dispatch 'hl.dsp.workspace.toggle_special("hypr-computer")'`. Hyprland moves your pointer when it removes the display, and the server puts it back within a few milliseconds. The display also stops when the agent that started it exits. If an agent crashed and left one behind, `status` finds it by name, and the next `start` takes it over.
+
+Its limits:
+
+- Typing in the background takes ASCII text only, with US key positions.
+- Each key typed in the background takes keyboard focus off your window for a moment, which can close a menu open in it.
+- Chromium ignores some shortcuts, such as `ctrl+r`, while its window doesn't have focus.
+- A key you press during a borrowed click can go to the agent's window.
+- An app that's already running may open its new window on your screen.
+- Tools that capture your whole desktop, rather than one monitor, also capture the agent display and the gap around it.
+- A Hyprland config reload resets the display's size and place until the agent next uses it.
 
 Every action takes `screenshot=true` to return the updated screen in the same call. `batch`, `open_url` and `wait_for` return one unless you pass `screenshot=false`. If the screen is identical to the last screenshot, the result says so instead of repeating the image. Each action's result also names the active window and the pointer position, and lists what Hyprland reported meanwhile: windows that opened or closed, focus and title changes. Coordinates are always pixels in the most recent screenshot.
 
@@ -144,7 +168,7 @@ When the server starts, it moves itself into a new Linux user namespace and netw
   - Hyprland moving the pointer to the middle of a window that it focused.
   - A move after a minute with no action from the agent, so the first action of a new request goes ahead.
 
-  Typing on your keyboard isn't noticed. Two agents working at the same time see each other's moves as yours.
+  Typing on your keyboard isn't noticed. Two agents working at the same time see each other's moves as yours. Typing on [the agent display](#the-agent-display) doesn't pause, and its clicks wait until you leave the mouse and keyboard alone.
 - **Deny-list.** Agents can't click or type into 1Password, Bitwarden, KeePassXC, GNOME Secrets, Seahorse, Proton Pass, polkit or pinentry. Both the focused window and the window under the pointer are checked, for every point of a move or a drag too. A `batch` stops before its next step when one of these windows opens or comes to the front. Change the list with `HYPR_COMPUTER_DENY`.
 - **Password managers never leave the machine.** Deny-listed windows are painted black in every image an agent gets and in what `find_text` reads. Their titles are hidden from window lists, events and status lines, `wait_for` never matches them, and `ui_find` never reads them. The whole screen is blacked out while one has focus (bars and its menus can show its title and contents anywhere), while one is in a window group (the group bar shows its title), and while windows are still moving around one. If Hyprland can't say where one is on screen, the capture is refused. A menu that a password manager leaves open after losing focus, reaching outside its window, isn't covered.
 - **Web pages only.** `open_url` refuses `file://` URLs unless you list their folders in `HYPR_COMPUTER_FILE_URLS`.
