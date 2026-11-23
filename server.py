@@ -2129,7 +2129,6 @@ def build_server():
         'org.gnome.Nautilus'. It opens on the current workspace, with its accessibility tree on.
         where: "agent" (the agent display; the default while it's on) or "user".
         screenshot=true returns the screen afterwards."""
-        where = where_to_open(where)
         apps = desktop_entries()
         did = apps.get(name.lower())
         if did is None:
@@ -2138,6 +2137,7 @@ def build_server():
             raise ValueError(f"no installed app named {name!r}" + (f"; did you mean: {', '.join(close)}" if close else ""))
         path = desktop_file(did)
         cmd = desktop_execs(path).get("") if path else None
+        where = where_to_open(where)
         guard(target=(f"'{did}'", app_names(did, cmd)), background=where == "agent")
         if not (cmd and any(k in os.path.basename(cmd[0]) for k in CHROMIUM_FAMILY)):
             if shutil.which("gtk-launch") is None:
@@ -2156,8 +2156,8 @@ def build_server():
         incognito window. Waits (up to wait_ms) for the page's window, then returns a
         screenshot. Much faster than launching the browser and typing into the address bar.
         where as for launch_app; on the agent display the browser has a profile of its own."""
-        where = where_to_open(where)
         url = checked_url(url)
+        where = where_to_open(where)
         cmd, names = browser_command(private)
         guard(target=(f"the browser '{names[0]}'", names), background=where == "agent")
         wait_s = max(0, min(15000, int(wait_ms))) / 1000
