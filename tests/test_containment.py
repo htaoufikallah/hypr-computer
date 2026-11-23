@@ -249,9 +249,18 @@ def test_a_mouse_move_after_a_minute_without_input_is_not_the_user_taking_over(d
     assert desktop.input.events == [("click", "left", 1), ("chord", (30,))]
 
 
-def can_make_namespaces() -> bool:
-    probe = ("import ctypes, sys; sys.exit(ctypes.CDLL(None, use_errno=True).unshare(0x10000000 | 0x40000000) != 0)")
-    return subprocess.run([sys.executable, "-c", probe]).returncode == 0
+SANDBOX_ENV = ("HYPR_COMPUTER_SANDBOX", "DBUS_SESSION_BUS_ADDRESS", "AT_SPI_BUS_ADDRESS")
+
+
+def sandbox_problem() -> str:
+    """Why the sandbox can't start on this machine (GitHub's Ubuntu runners refuse the uid map), or ''."""
+    probe = f"import sys; sys.path.insert(0, {os.path.dirname(SERVER)!r}); import server; print(server.confine())"
+    r = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, timeout=30,
+                       env={k: v for k, v in os.environ.items() if k not in SANDBOX_ENV})
+    return r.stdout.strip() or r.stderr.strip()[-300:]
+
+
+SANDBOX_PROBLEM = sandbox_problem()
 
 
 def self_check(tmp_path, **env) -> list[str]:
@@ -265,9 +274,9 @@ def self_check(tmp_path, **env) -> list[str]:
     return r.stdout.splitlines()
 
 
-@pytest.mark.skipif(not can_make_namespaces(), reason="this kernel doesn't let programs make network namespaces")
+@pytest.mark.skipif(bool(SANDBOX_PROBLEM), reason=f"the sandbox can't start here: {SANDBOX_PROBLEM}")
 def test_the_server_and_the_programs_it_runs_have_no_network_but_reach_hyprland(tmp_path, monkeypatch):
-    for var in ("HYPR_COMPUTER_SANDBOX", "DBUS_SESSION_BUS_ADDRESS", "AT_SPI_BUS_ADDRESS"):
+    for var in SANDBOX_ENV:
         monkeypatch.delenv(var, raising=False)
     lines = self_check(tmp_path)
     assert "PASS  network: blocked (test connections to 1.1.1.1 and 2606:4700:4700::1111 failed)" in lines
