@@ -55,6 +55,7 @@ class FakeHyprland:
         self.window_rules: dict[str, dict] = {}
         self.keys: int | None = None
         self.warps = False
+        self.default_workspace_rules = True  # False: like Hyprland 0.56, a new output shows a numbered workspace
         self.binds: list[dict] = []
         self.animations = [[{"name": "global", "overridden": True, "enabled": True, "speed": 1.0}], []]
         self.requests: list[str] = []
@@ -111,7 +112,8 @@ class FakeHyprland:
             right = max(m["x"] + m["width"] / m["scale"] for m in self.monitors)
             x, y = (right, 0) if rule["position"] == "auto" else map(int, rule["position"].split("x"))
             ws = next((r["workspace"].removeprefix("name:") for r in self.workspace_rules
-                       if r.get("monitor") == name and r.get("default")), name)
+                       if r.get("monitor") == name and r.get("default") and self.default_workspace_rules),
+                      str(20 + len(self.monitors)))
             m = {"id": max(m["id"] for m in self.monitors) + 1, "name": name, "x": x, "y": y, "width": w,
                  "height": h, "scale": float(rule.get("scale", 1)), "transform": 0,
                  "activeWorkspace": named_workspace(ws), "specialWorkspace": named_workspace("")}
@@ -173,6 +175,12 @@ class FakeHyprland:
             self.cursor = (m["x"] + m["width"] / m["scale"] / 2, m["y"] + m["height"] / m["scale"] / 2)
             shown = [c for c in self.clients if (c.get("workspace") or {}).get("name") == m["activeWorkspace"]["name"]]
             self.active = min(shown, key=lambda c: c.get("focusHistoryID", 99), default={})
+        elif name == "focus" and "workspace" in args:  # shows it on the monitor a rule binds it to, and focuses that
+            ws = args["workspace"].removeprefix("name:")
+            bound = next((r["monitor"] for r in self.workspace_rules if r["workspace"].removeprefix("name:") == ws), None)
+            m = next(m for m in self.monitors if m["name"] == (bound or self.focused))
+            m["activeWorkspace"] = named_workspace(ws)
+            self.dispatch("focus", {"monitor": m["name"]})
         elif name == "focus" and "window" in args:
             w = next((c for c in self.clients if "address:" + c.get("address", "") == args["window"]), None)
             if w and self.warps:

@@ -56,6 +56,13 @@ def test_start_adds_a_display_out_of_reach_of_the_users_pointer_and_leaves_their
     assert user.call("agent_display", action="status").startswith("The agent display is on: 1280x800")
 
 
+def test_on_hyprland_0_56_the_display_still_shows_the_agents_workspace_and_the_user_stays_put(user):
+    user.hypr.default_workspace_rules = False  # 0.56 gives a new output a numbered workspace despite the rule
+    user.call("agent_display", action="start")
+    assert user.hypr.monitors[1]["activeWorkspace"]["name"] == "hypr-computer"
+    assert users_seat(user) == ((600, 500), USER_FOOT, "eDP-1")
+
+
 def test_a_display_that_a_config_reload_moved_next_to_the_users_goes_back_when_next_used(agent):
     display = agent.hypr.monitors[1]
     display.update(x=1280, y=0, width=1920, height=1080, scale=1.0)  # Hyprland's default for an output with no rule

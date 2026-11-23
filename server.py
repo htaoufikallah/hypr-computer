@@ -1755,9 +1755,14 @@ def start_agent_display() -> str:
     if agent is None:
         was = seat()
         hypr_command(f"output create headless {AGENT}")
-        if wait_for_agent_display(on=True) is None:
+        agent = wait_for_agent_display(on=True)
+        if agent is None:
             raise RuntimeError("Hyprland didn't add the agent display")
         lost = give_back(was)
+    if agent["activeWorkspace"]["name"] != AGENT:  # Hyprland 0.56 ignores the rule's default=true
+        was = seat()
+        dispatch("focus", {"workspace": AGENT_WORKSPACE})
+        lost = give_back(was) or lost
     for c in hypr_json("clients"):
         if workspace(c) == PARKED:
             dispatch("window.move", {"workspace": AGENT_WORKSPACE, "window": "address:" + c["address"],
