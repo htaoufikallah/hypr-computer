@@ -33,7 +33,8 @@ Updates install tested releases only, and roll back on their own if something go
 
 ## Private and safe
 
-- **Nothing leaves your machine.** The server never connects to the network. Screenshots go only to your agent, which sends them to its own model provider.
+- **Nothing leaves your machine.** The server runs cut off from the network. Screenshots go only to your agent, which sends them to its own model provider.
+- **You set the limits.** `hypr-computer allow firefox --for 30m` keeps agents to the apps you name, and an agent stops when you move the mouse.
 - **You'll always know.** A notice appears on screen when an agent takes control.
 - **Password managers are off-limits.** Agents can't click or type into 1Password, Bitwarden, KeePassXC or system password prompts, and those windows are blacked out of every screenshot.
 

@@ -11,7 +11,7 @@ If you're an agent asked to set up computer use on this machine:
    curl -fsSL malik-na.github.io/hypr-computer | bash -s -- --yes --clients=<client>
    ```
    If `sudo` can't prompt from your environment, ask the user to run the command in a terminal.
-4. **Read the output.** The self-check prints one PASS or FAIL line per check and ends with `hypr-computer is ready.` Each FAIL line names its fix.
+4. **Read the output.** The self-check prints one PASS, WARN or FAIL line per check and ends with `hypr-computer is ready.` Each FAIL line names its fix. A WARN line doesn't stop the install.
 5. **Other clients.** For VS Code, Zed, Goose, Cline or Windsurf, add the matching snippet from [Connecting your agent](docs/clients.md), with the absolute path `/home/<user>/.local/share/hypr-computer/server.py`.
 6. **Restart, then smoke test.** Ask the user to restart the agent. Then call `list_windows` and `screenshot`. If you can see the screenshot, setup is done. Don't click or type during the test unless the user asks.
 

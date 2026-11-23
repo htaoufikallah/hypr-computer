@@ -16,7 +16,8 @@ class FakeHyprland:
     """Hyprland 0.57's IPC socket: one request per connection, written as `flags/command`
     (`j/clients`, `/dispatch hl.dsp...`), answered with JSON, `ok` or `error: ...`.
     Its event socket sends `name>>data` lines to every reader, with addresses lacking the `0x`
-    that `j/clients` gives them, as 0.57.2 does."""
+    that `j/clients` gives them, as 0.57.2 does. With `warps`, focusing a window moves the pointer to its
+    middle, as Hyprland does unless `cursor:no_warps` is set."""
 
     def __init__(self, monitors=None, clients=None, active=None):
         self.root = tempfile.mkdtemp(prefix="hc", dir="/tmp")  # AF_UNIX paths max out at 108 bytes
@@ -24,6 +25,8 @@ class FakeHyprland:
         self.clients = clients or []
         self.active = active or {}
         self.cursor = (0, 0)
+        self.warps = False
+        self.binds: list[dict] = []
         self.animations = [[{"name": "global", "overridden": True, "enabled": True, "speed": 1.0}], []]
         self.requests: list[str] = []
         self.on_request = lambda request: None
@@ -64,12 +67,16 @@ class FakeHyprland:
     def reply(self, request: str) -> str:
         answers = {"j/monitors": self.monitors, "j/clients": self.clients, "j/activewindow": self.active,
                    "j/cursorpos": {"x": self.cursor[0], "y": self.cursor[1]}, "j/version": {"version": "0.57.2"},
-                   "j/animations": self.animations}
+                   "j/animations": self.animations, "j/binds": self.binds}
         if request in answers:
             return json.dumps(answers[request])
         move = re.fullmatch(r"/dispatch hl\.dsp\.cursor\.move\(\{x = (-?\d+), y = (-?\d+)\}\)", request)
         if move:
             self.cursor = (int(move[1]), int(move[2]))
+        focus = re.fullmatch(r'/dispatch hl\.dsp\.focus\(\{window = "address:(\w+)"\}\)', request)
+        w = next((c for c in self.clients if focus and c.get("address") == focus[1]), None)
+        if w and self.warps:
+            self.active, self.cursor = w, (w["at"][0] + w["size"][0] // 2, w["at"][1] + w["size"][1] // 2)
         if request.startswith(("/dispatch hl.dsp.", "/notify ")):
             return "ok"
         return f"error: unknown request {request!r}"

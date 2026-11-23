@@ -57,6 +57,8 @@ def desktop(hypr, monkeypatch):
     monkeypatch.setattr(server, "_ocr_cache", collections.OrderedDict())
     monkeypatch.setattr(server, "_refs", {})
     monkeypatch.setattr(server, "_goals", {})
+    monkeypatch.setattr(server, "_pointer", None)
+    monkeypatch.setattr(server, "_grant_noted", server.NO_GRANT)
     monkeypatch.delenv("HYPR_COMPUTER_TOOLS", raising=False)
     monkeypatch.delenv("HYPR_COMPUTER_RECORD_DIR", raising=False)
     d = Desktop(hypr, vi)
