@@ -160,6 +160,15 @@ def test_a_click_on_a_deny_listed_window_in_a_shown_special_workspace_is_refused
     assert desktop.input.events == []
 
 
+def test_a_deny_listed_window_on_a_shown_scratchpad_is_black_though_hyprland_gives_it_no_id(screen, monkeypatch):
+    monkeypatch.setenv("FAKE_GRIM_MARK", SQUARE)
+    scratchpad = {"address": "special:scratchpad", "type": "special", "name": "special:scratchpad"}  # as in 0.57
+    screen.hypr.monitors = [{**screen.hypr.monitors[0], "specialWorkspace": scratchpad}]
+    screen.hypr.clients = [FOOT, {**KEEPASS, "workspace": scratchpad}]
+    text, (image,) = screen.result("screenshot")
+    assert gray(image, (320, 220))[0] < 16 and "Black areas hide deny-listed windows" in text
+
+
 def test_capture_is_refused_when_a_deny_listed_window_on_screen_has_no_position(screen):
     screen.hypr.clients = [{**KEEPASS, "size": [0, 0]}]
     for tool, args in (("screenshot", {}), ("zoom", {"x": 0, "y": 0, "width": 10, "height": 10}),

@@ -105,13 +105,13 @@ def test_deny_list_can_be_disabled(monkeypatch):
 
 def test_windows_at_point():
     clients = [
-        {"class": "a", "at": [0, 0], "size": [800, 600], "workspace": {"id": 1}},
-        {"class": "b", "at": [800, 0], "size": [800, 600], "workspace": {"id": 1}},
-        {"class": "c", "at": [0, 0], "size": [800, 600], "workspace": {"id": 2}},
+        {"class": "a", "at": [0, 0], "size": [800, 600], "workspace": {"id": 1, "name": "1"}},
+        {"class": "b", "at": [800, 0], "size": [800, 600], "workspace": {"id": 1, "name": "1"}},
+        {"class": "c", "at": [0, 0], "size": [800, 600], "workspace": {"id": 2, "name": "2"}},
     ]
-    assert [c["class"] for c in server.windows_at(clients, 100, 100, {1})] == ["a"]
-    assert [c["class"] for c in server.windows_at(clients, 900, 100, {1})] == ["b"]
-    assert server.windows_at(clients, 2000, 100, {1}) == []
+    assert [c["class"] for c in server.windows_at(clients, 100, 100, {"1"})] == ["a"]
+    assert [c["class"] for c in server.windows_at(clients, 900, 100, {"1"})] == ["b"]
+    assert server.windows_at(clients, 2000, 100, {"1"}) == []
 
 
 def test_session_env_forces_utf8(monkeypatch):

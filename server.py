@@ -129,9 +129,14 @@ def layout_from_monitors(monitors: list[dict]) -> Layout:
     return Layout(x0, y0, max(b[0] + b[2] for b in boxes) - x0, max(b[1] + b[3] for b in boxes) - y0)
 
 
-def visible_workspaces(monitors: list[dict]) -> set[int]:
-    return ({m["activeWorkspace"]["id"] for m in monitors}
-            | {m["specialWorkspace"]["id"] for m in monitors if (m.get("specialWorkspace") or {}).get("id")})
+def workspace(c: dict) -> str:
+    """The name of a window's workspace. Hyprland 0.57 gives named and special workspaces no id."""
+    return (c.get("workspace") or {}).get("name", "")
+
+
+def visible_workspaces(monitors: list[dict]) -> set[str]:
+    return ({m["activeWorkspace"]["name"] for m in monitors}
+            | {m["specialWorkspace"]["name"] for m in monitors if (m.get("specialWorkspace") or {}).get("name")})
 
 
 def parse_combo(combo: str) -> list[int]:
@@ -182,10 +187,10 @@ def redacted(clients: list[dict]) -> list[dict]:
     return [{**c, "title": "", "denied": True} if denied_window([c], pattern) else c for c in clients]
 
 
-def windows_at(clients: list[dict], lx: float, ly: float, workspace_ids: set[int]) -> list[dict]:
+def windows_at(clients: list[dict], lx: float, ly: float, workspaces: set[str]) -> list[dict]:
     out = []
     for c in clients:
-        if c.get("workspace", {}).get("id") not in workspace_ids or c.get("hidden"):
+        if workspace(c) not in workspaces or c.get("hidden"):
             continue
         (x, y), (w, h) = c["at"], c["size"]
         if x <= lx < x + w and y <= ly < y + h:
@@ -667,7 +672,7 @@ def on_top(under: list[dict]) -> list[dict]:
     """The windows at a point that may be drawn above the others there: windows on a special workspace over
     the rest, then a fullscreen window and floating windows over tiled ones. Hyprland doesn't say which of two
     floating windows is above, so both count."""
-    under = [c for c in under if (c.get("workspace") or {}).get("id", 0) < 0] or under
+    under = [c for c in under if workspace(c).startswith("special:")] or under
     return [c for c in under if c.get("fullscreen") or c.get("floating")] or under
 
 
@@ -761,7 +766,7 @@ _goals: dict[str, tuple[tuple, float]] = {}  # deny-listed window -> (where Hypr
 
 
 def goal(c: dict) -> tuple:
-    return window_box(c), (c.get("workspace") or {}).get("id"), bool(c.get("hidden"))
+    return window_box(c), workspace(c), bool(c.get("hidden"))
 
 
 def calm(denied: list[dict], limit: float = 1.0) -> bool:
@@ -810,7 +815,7 @@ def hidden_boxes(pattern: re.Pattern, clients: list[dict], monitors: list[dict],
     shown = visible_workspaces(monitors)
     boxes = []
     for c in clients:
-        if not denied_window([c], pattern) or not ((c.get("workspace") or {}).get("id") in shown or c.get("pinned")):
+        if not denied_window([c], pattern) or not (workspace(c) in shown or c.get("pinned")):
             continue
         if c.get("address") in active:
             return BLACKED_OUT["focus"]
@@ -1063,13 +1068,13 @@ def text_pattern(query: str) -> re.Pattern:
 
 def on_screen_window(scr: Screen, query: str) -> dict:
     shown = visible_workspaces(scr.monitors)
-    hits = sorted(matching_windows(redacted(scr.clients), query), key=lambda c: c["workspace"]["id"] not in shown)
+    hits = sorted(matching_windows(redacted(scr.clients), query), key=lambda c: workspace(c) not in shown)
     if not hits:
         raise ValueError(f"no window matches {query!r}; call list_windows")
     w = hits[0]
     if w.get("denied"):
         raise refused(f"Refused: '{w.get('class')}' is on the deny-list. Ask the user.")
-    if w["workspace"]["id"] not in shown or window_box(w) is None:
+    if workspace(w) not in shown or window_box(w) is None:
         raise ValueError(f"{w['class']} is not on screen; focus_window it first")
     return w
 
@@ -1458,7 +1463,7 @@ def a11y_target(clients: list[dict], window: str = "", address: str = "") -> dic
 
 
 def on_screen(w: dict, monitors: list[dict]) -> bool:
-    return (w.get("workspace") or {}).get("id") in visible_workspaces(monitors) and not w.get("hidden")
+    return workspace(w) in visible_workspaces(monitors) and not w.get("hidden")
 
 
 def a11y_request(w: dict, monitors: list[dict], **fields) -> dict:
