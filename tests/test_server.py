@@ -233,7 +233,7 @@ def test_drag_stops_when_the_user_stops_it_mid_drag(desktop):
         if len(desktop.hypr.dispatched("cursor.move")) == 3:
             open(desktop.hypr.stop_file, "w").close()
     desktop.hypr.on_request = stop_after_three_moves
-    with pytest.raises(Exception, match=r"Stopped by the user.*stopped at \(200, 100\), where the button was released"):
+    with pytest.raises(Exception, match=r"Stopped by the user.*The drag stopped, and the button was released at \(200, 100\)"):
         desktop.call("drag", x1=100, y1=100, x2=600, y2=100)
     assert len(desktop.hypr.dispatched("cursor.move")) == 3
     assert desktop.input.events == [("button", "left", True), ("button", "left", False)]
@@ -327,10 +327,10 @@ def test_binaries_are_resolved_once_so_a_later_path_change_cannot_swap_them(tmp_
 
 def test_browser_command_override_adds_private_flag(monkeypatch):
     monkeypatch.setenv("HYPR_COMPUTER_BROWSER", "chromium --user-data-dir=/tmp/x")
-    assert server.browser_command(False) == ["chromium", "--user-data-dir=/tmp/x"]
-    assert server.browser_command(True)[-1] == "--incognito"
+    assert server.browser_command(False) == (["chromium", "--user-data-dir=/tmp/x"], ("chromium",))
+    assert server.browser_command(True)[0][-1] == "--incognito"
     monkeypatch.setenv("HYPR_COMPUTER_BROWSER", "/usr/bin/firefox")
-    assert server.browser_command(True) == ["/usr/bin/firefox", "--private-window"]
+    assert server.browser_command(True) == (["/usr/bin/firefox", "--private-window"], ("firefox",))
 
 
 def test_page_ready_ignores_blank_and_loading_tabs():
@@ -396,5 +396,5 @@ def test_private_window_uses_the_default_browsers_own_private_action(tmp_path, m
     monkeypatch.setenv("PATH", f"{xdg_mime.parent}:{os.environ['PATH']}")
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
     monkeypatch.delenv("HYPR_COMPUTER_BROWSER", raising=False)
-    assert server.browser_command(False) == ["mybrowser"]
-    assert server.browser_command(True) == ["mybrowser", "--secret-mode"]
+    assert server.browser_command(False) == (["mybrowser"], ("mybrowser",))
+    assert server.browser_command(True) == (["mybrowser", "--secret-mode"], ("mybrowser",))

@@ -78,7 +78,11 @@ KEYCODES.update({
     "page_up": 104, "page_down": 109, "prior": 104, "next": 109, "esc_key": 1,
     "lctrl": 29, "rctrl": 97, "lshift": 42, "rshift": 54, "lalt": 56, "ralt": 100,
     "option": 56, "opt": 56, "printscreen": 99, "prtsc": 99, "menu": 127,
+    "super_l": 125, "alt_l": 56, "alt_r": 100, "control_l": 29, "control_r": 97, "shift_l": 42, "shift_r": 54,
+    "caps_lock": 58, "xf86audioraisevolume": 115, "xf86audiolowervolume": 114, "xf86audiomute": 113,
 })
+KEY_NAMES = {code: {name for name, c in KEYCODES.items() if c == code} for code in set(KEYCODES.values())}
+MODIFIER_BITS = {42: 1, 54: 1, 29: 4, 97: 4, 56: 8, 125: 64, 100: 128}  # Hyprland's modmask
 
 
 @dataclass(frozen=True)
@@ -214,6 +218,93 @@ def check_stop() -> None:
     if os.path.exists(stop_file()):
         raise RuntimeError(f"Stopped by the user ({stop_file()} exists). Ask the user before "
                            "continuing; they resume by deleting that file.")
+
+
+class Refused(RuntimeError):
+    """An action the user hasn't allowed. The agent should ask the user."""
+
+
+def refused(why: str) -> Refused:
+    append_record({"event": "refused", "result": why})
+    return Refused(why)
+
+
+def grant_file() -> str:
+    return os.path.join(session_env()["XDG_RUNTIME_DIR"], "hypr-computer.grant")
+
+
+def clock(t: float) -> str:
+    same_day = time.localtime(t)[:3] == time.localtime()[:3]
+    return time.strftime("%H:%M" if same_day else "%a %d %b %H:%M", time.localtime(t))
+
+
+@dataclass(frozen=True)
+class Grant:
+    """The apps `hypr-computer allow` lets agents use, as lower-case window classes, until `until` (seconds
+    since the epoch; None until the user turns it off). Agents may only read the screen once it has expired."""
+    apps: tuple[str, ...]
+    until: float | None = None
+
+    def expired(self) -> bool:
+        return self.until is not None and time.time() >= self.until
+
+    def status(self) -> str:
+        if not self.apps:
+            return f"Agents may only read the screen: {grant_file()} can't be read. Reset it: hypr-computer allow --off"
+        if self.expired():
+            return (f"Agents could use only {', '.join(self.apps)} until {clock(self.until)}; now they may only read "
+                    f"the screen. Renew: hypr-computer allow {','.join(self.apps)} --for 30m, or let them use every "
+                    "app: hypr-computer allow --off")
+        return f"Agents may use only {', '.join(self.apps)}" + (f", until {clock(self.until)}." if self.until else ".")
+
+
+NO_GRANT = "No grant: agents may use every app except the deny-list."
+Target = tuple[str, tuple[str, ...]]  # an app as the agent is told of it, and the names a grant may give it
+HYPRLAND: Target = ("Hyprland, which has a bind for this key combo", ("hyprland",))
+
+
+def read_grant() -> Grant | None:
+    """The user's grant, or None if there is none, so agents may use every app. A grant that can't be read
+    allows nothing."""
+    try:
+        with open(grant_file()) as f:
+            data = json.load(f)
+        if not isinstance(data["apps"], list):
+            raise TypeError("apps is not a list")
+        return Grant(tuple(str(a).lower() for a in data["apps"]),
+                     None if data["until"] is None else float(data["until"]))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, KeyError, TypeError):
+        return Grant(())
+
+
+def grant_refusal(grant: Grant, targets: list[Target]) -> str | None:
+    """Why the grant doesn't allow an action on all of `targets`, or None if it does."""
+    apps = ", ".join(grant.apps)
+    if not grant.apps:
+        return "Refused: the user lets agents only read the screen right now. Ask the user."
+    if grant.expired():
+        return (f"Refused: the user let agents use {apps} only until {clock(grant.until)}, so you may only read "
+                "the screen now. Ask the user to renew it.")
+    if not targets:
+        return f"Refused: the user lets agents use only {apps}, and no window of those apps is there. Ask the user."
+    for label, names in targets:
+        if not set(names) & set(grant.apps):
+            return f"Refused: the user lets agents use only {apps}, not {label}. Ask the user before continuing."
+    return None
+
+
+_grant_noted = NO_GRANT  # what the recording last said about the grant
+
+
+def note_grant() -> None:
+    global _grant_noted
+    grant = read_grant()
+    said = grant.status() if grant else NO_GRANT
+    if said != _grant_noted:
+        _grant_noted = said
+        append_record({"event": "grant", "result": said})
 
 
 TIMINGS = ("settle_ms", "capture_ms", "ipc_ms", "ocr_ms", "a11y_ms")
@@ -474,10 +565,46 @@ class HyprEvents:
 EVENTS = HyprEvents()
 
 
+POINTER_SLACK = 4  # logical pixels: rounding, and Hyprland keeping the pointer on a monitor
+USER_ACTIVE = "The user is using the mouse; ask before continuing."
+_pointer: tuple[float, float, float] | None = None  # where the agent last put or found the pointer, and when
+
+
+def near(a: tuple[float, float], b: tuple[float, float]) -> bool:
+    return abs(a[0] - b[0]) <= POINTER_SLACK and abs(a[1] - b[1]) <= POINTER_SLACK
+
+
+def pointer() -> tuple[float, float] | None:
+    try:
+        pos = hypr_json("cursorpos")
+        return pos["x"], pos["y"]
+    except (RuntimeError, ValueError, KeyError, TypeError):
+        return None
+
+
+def check_user() -> None:
+    """Refuses, once, when the pointer isn't where the agent last left it: the user moved the mouse. Hyprland
+    putting it in the middle of a window or monitor it focused doesn't count, nor does a move after a minute
+    without input. When Hyprland doesn't say where the pointer is, the action goes ahead."""
+    global _pointer
+    at = pointer()
+    if at is None:
+        return
+    before, _pointer = _pointer, (*at, time.monotonic())
+    if before is None or _pointer[2] - before[2] > NOTICE_IDLE_S or near(at, before[:2]):
+        return
+    boxes = [window_box(hypr_json("activewindow") or {}), *map(monitor_box, hypr_json("monitors"))]
+    if any(near(at, (x + w / 2, y + h / 2)) for x, y, w, h in filter(None, boxes)):
+        return
+    raise refused(USER_ACTIVE)
+
+
 def move_pointer(layout: Layout, x: float, y: float) -> tuple[int, int]:
+    global _pointer
     lx, ly = layout.to_logical(x, y)
     dispatch("cursor.move", {"x": lx, "y": ly})
     time.sleep(0.03)
+    _pointer = (*(pointer() or (lx, ly)), time.monotonic())  # Hyprland keeps the pointer on a monitor
     return lx, ly
 
 
@@ -530,18 +657,41 @@ def with_input(kind: str, fn):
         mark_input(kind)
 
 
-def guard(point: tuple[int, int] | None = None) -> None:
+def window_target(w: dict) -> Target:
+    cls = w.get("class") or ""
+    return f"'{cls}'", (cls.lower(),)
+
+
+def on_top(under: list[dict]) -> list[dict]:
+    """The windows at a point that may be drawn above the others there: windows on a special workspace over
+    the rest, then a fullscreen window and floating windows over tiled ones. Hyprland doesn't say which of two
+    floating windows is above, so both count."""
+    under = [c for c in under if (c.get("workspace") or {}).get("id", 0) < 0] or under
+    return [c for c in under if c.get("fullscreen") or c.get("floating")] or under
+
+
+def guard(point: tuple[int, int] | None = None, target: Target | None = None, hyprland: bool = False) -> None:
+    """Checks an input action before it starts: the user hasn't stopped agents or taken the mouse, and the action
+    touches no deny-listed window and only apps the user allowed. It acts at `point`, on `target`, or else on the
+    focused window; with `hyprland`, also on Hyprland itself."""
     global _last_action
     check_stop()
-    pattern = deny_pattern()
-    if pattern is not None:
-        targets = [hypr_json("activewindow") or {}]
-        if point is not None:
-            targets += windows_at(hypr_json("clients"), *point, visible_workspaces(hypr_json("monitors")))
-        hit = denied_window(targets, pattern)
+    check_user()
+    pattern, grant = deny_pattern(), read_grant()
+    if pattern is not None or grant is not None:
+        active = hypr_json("activewindow") or {}
+        under = (windows_at(hypr_json("clients"), *point, visible_workspaces(hypr_json("monitors")))
+                 if point is not None else [])
+        hit = denied_window([active, *under], pattern)
         if hit:
-            raise RuntimeError(f"Refused: '{hit.get('class')}' is on the deny-list "
-                               "(HYPR_COMPUTER_DENY). Ask the user to do this step.")
+            raise refused(f"Refused: '{hit.get('class')}' is on the deny-list "
+                          "(HYPR_COMPUTER_DENY). Ask the user to do this step.")
+        if grant is not None:
+            targets = ([target] if target else [window_target(w) for w in on_top(under)] if point is not None
+                       else [window_target(active)] if active else [])
+            why = grant_refusal(grant, targets + [HYPRLAND] * hyprland)
+            if why:
+                raise refused(why)
     now = time.monotonic()
     if now - _last_action > NOTICE_IDLE_S:
         try:
@@ -787,7 +937,8 @@ def act_drag(x1: float, y1: float, x2: float, y2: float) -> str:
             move_pointer(lay, *p)
             at = p
     except RuntimeError as e:
-        raise RuntimeError(f"{e} The drag stopped at ({at[0]:g}, {at[1]:g}), where the button was released.") from None
+        where = ("where the user moved the pointer" if str(e) == USER_ACTIVE else f"at ({at[0]:g}, {at[1]:g})")
+        raise RuntimeError(f"{e} The drag stopped, and the button was released {where}.") from None
     finally:
         with_input("drag", lambda v: v.button("left", False))
     return f"dragged ({x1}, {y1}) -> ({x2}, {y2})"
@@ -818,9 +969,21 @@ def act_type(text: str) -> str:
     return f"typed {len(text)} characters"
 
 
+def hyprland_bind(codes: list[int]) -> bool:
+    """Whether Hyprland has a bind for this combo, so that Hyprland gets it instead of the focused window: the
+    last key with the others held. A bind list that can't be read counts as a bind."""
+    mods = functools.reduce(lambda m, c: m | MODIFIER_BITS.get(c, 0), codes[:-1], 0)
+    try:
+        binds = hypr_json("binds")
+    except ValueError:
+        return True
+    return any(b.get("modmask") == mods and ((b.get("key") or "").lower() in KEY_NAMES[codes[-1]]
+                                             or b.get("keycode") == codes[-1] + 8) for b in binds)
+
+
 def act_key(combo: str) -> str:
     codes = parse_combo(combo)
-    guard()
+    guard(hyprland=read_grant() is not None and hyprland_bind(codes))
     with_input("key", lambda v: v.chord(codes))
     return f"pressed {combo}"
 
@@ -904,7 +1067,7 @@ def on_screen_window(scr: Screen, query: str) -> dict:
         raise ValueError(f"no window matches {query!r}; call list_windows")
     w = hits[0]
     if w.get("denied"):
-        raise RuntimeError(f"Refused: '{w.get('class')}' is on the deny-list. Ask the user.")
+        raise refused(f"Refused: '{w.get('class')}' is on the deny-list. Ask the user.")
     if w["workspace"]["id"] not in shown or window_box(w) is None:
         raise ValueError(f"{w['class']} is not on screen; focus_window it first")
     return w
@@ -1070,6 +1233,11 @@ def run_steps(steps: list[dict]) -> tuple[list[str], bool]:
         if name not in ACTIONS:
             log.append(f"step {i}: unknown action {name!r}; use one of {', '.join(ACTIONS)}. Stopped.")
             return log, False
+        try:
+            check_user()
+        except Refused as e:
+            log.append(f"Stopped before step {i}: {e} Step {i} and later were not run.")
+            return log, False
         started = time.monotonic()
         try:
             log.append(f"step {i}: {ACTIONS[name](**step)}")
@@ -1161,8 +1329,15 @@ PRIVATE_FLAGS = {"firefox": "--private-window", "librewolf": "--private-window",
                  "floorp": "--private-window", "microsoft-edge": "--inprivate"}
 
 
-def browser_command(private: bool) -> list[str]:
-    override = os.environ.get("HYPR_COMPUTER_BROWSER")
+def app_names(did: str, cmd: list[str] | None) -> tuple[str, ...]:
+    """The names a grant may give an app: its desktop id and its program's name."""
+    return tuple(dict.fromkeys(n.lower() for n in (did, os.path.basename(cmd[0]) if cmd else "") if n))
+
+
+def browser_command(private: bool) -> tuple[list[str], tuple[str, ...]]:
+    """The command that opens a page in the user's browser, and the names a grant may give the browser."""
+    override = os.environ.get("HYPR_COMPUTER_BROWSER", "").strip()
+    did = ""
     if override:
         cmd = shlex.split(override)
     else:
@@ -1174,14 +1349,14 @@ def browser_command(private: bool) -> list[str]:
         if private:
             for name, action in execs.items():
                 if name and ("private" in name or "incognito" in name or "inprivate" in name):
-                    return action
+                    return action, app_names(did, action)
         if not execs.get(""):
             raise RuntimeError(f"{path} has no Exec line")
         cmd = execs[""]
     if private:
         exe = os.path.basename(cmd[0])
         cmd = cmd + [next((f for k, f in PRIVATE_FLAGS.items() if k in exe), "--incognito")]
-    return cmd
+    return cmd, app_names(did, cmd)
 
 
 def checked_url(url: str) -> str:
@@ -1277,7 +1452,7 @@ def a11y_target(clients: list[dict], window: str = "", address: str = "") -> dic
         if w is None:
             raise ValueError("no window is focused; pass window=")
     if w.get("denied"):
-        raise RuntimeError(f"Refused: '{w.get('class')}' is on the deny-list. Ask the user.")
+        raise refused(f"Refused: '{w.get('class')}' is on the deny-list. Ask the user.")
     return w
 
 
@@ -1356,7 +1531,7 @@ def save_screenshot(folder: str, image: bytes) -> str:
             continue
 
 
-def record(tool: str, args: dict, text: str, image: bytes | None, times: dict[str, float]) -> None:
+def append_record(entry: dict, image: bytes | None = None) -> None:
     out = os.environ.get("HYPR_COMPUTER_RECORD_DIR")
     if not out:
         return
@@ -1364,10 +1539,13 @@ def record(tool: str, args: dict, text: str, image: bytes | None, times: dict[st
         os.makedirs(out, mode=0o700, exist_ok=True)
         shot = save_screenshot(out, image) if image else None
         write_private(os.path.join(out, "steps.jsonl"), (json.dumps(
-            {"time": time.time(), "tool": tool, "args": recorded_args(args), "result": text,
-             "screenshot": shot, **times}) + "\n").encode(), os.O_APPEND)
+            {"time": time.time(), **entry, "screenshot": shot}) + "\n").encode(), os.O_APPEND)
     except (OSError, TypeError, ValueError):
         pass
+
+
+def record(tool: str, args: dict, text: str, image: bytes | None, times: dict[str, float]) -> None:
+    append_record({"tool": tool, "args": recorded_args(args), "result": text, **times}, image)
 
 
 CORE_INSTRUCTIONS = """\
@@ -1410,6 +1588,7 @@ def build_server():
                 started = time.monotonic()
                 try:
                     check_stop()
+                    note_grant()
                     out = fn(**args)
                     text, image = out if isinstance(out, tuple) else (out, None)
                     if reports:
@@ -1535,8 +1714,8 @@ def build_server():
             raise ValueError(f"no window matches {query!r}; call list_windows")
         w = hits[0]
         if w.get("denied"):
-            raise RuntimeError(f"Refused: '{w.get('class')}' is on the deny-list. Ask the user.")
-        guard()
+            raise refused(f"Refused: '{w.get('class')}' is on the deny-list. Ask the user.")
+        guard(target=window_target(w))
         dispatch("focus", {"window": "address:" + w["address"]})
         mark_input("focus")
         return f"focused {w['class']} — {w['title']} (workspace {w['workspace']['name']})"
@@ -1552,9 +1731,9 @@ def build_server():
             import difflib
             close = difflib.get_close_matches(name.lower(), list(apps), n=5, cutoff=0.5)
             raise ValueError(f"no installed app named {name!r}" + (f"; did you mean: {', '.join(close)}" if close else ""))
-        guard()
         path = desktop_file(did)
         cmd = desktop_execs(path).get("") if path else None
+        guard(target=(f"'{did}'", app_names(did, cmd)))
         if not (cmd and any(k in os.path.basename(cmd[0]) for k in CHROMIUM_FAMILY)):
             if shutil.which("gtk-launch") is None:
                 raise RuntimeError("gtk-launch is not installed (it comes with GTK 3)")
@@ -1569,8 +1748,9 @@ def build_server():
         incognito window. Waits (up to wait_ms) for the page's window, then returns a
         screenshot. Much faster than launching the browser and typing into the address bar."""
         url = checked_url(url)
-        guard()
-        cmd = with_a11y(browser_command(private) + [url])
+        cmd, names = browser_command(private)
+        guard(target=(f"the browser '{names[0]}'", names))
+        cmd = with_a11y(cmd + [url])
         before = active_window_key()
         dispatch("exec_cmd", cmd)
         EVENTS.wait(lambda: page_ready(before, active_window_key()), max(0, min(15000, int(wait_ms))) / 1000)
@@ -1628,7 +1808,7 @@ def build_server():
             raise ValueError(f"unknown ref {ref!r}; call ui_find for current refs")
         clients, monitors = hypr_json("clients"), hypr_json("monitors")
         w = a11y_target(clients, address=known["address"])
-        guard()
+        guard(target=window_target(w))
         out = a11y(a11y_request(w, monitors, op="act", path=known["path"], role=known["role"], name=known["name"],
                                 action=action.strip()))
         known["path"] = out["path"]
@@ -1725,10 +1905,59 @@ def self_check() -> int:
     return 1 if failed else 0
 
 
+DURATION = re.compile(r"(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?")
+ALLOW_USAGE = """usage: hypr-computer allow APP[,APP...] [--for 30m]   let agents use only these apps
+       hypr-computer allow --list                      show what agents may use
+       hypr-computer allow --off                       let agents use every app again
+
+APP is a window class, as `hyprctl clients` shows it (foot, chromium, firefox). Agents can still read the
+whole screen. Once the time is up they may only read it. Add hyprland to allow key combos that Hyprland
+has a bind for."""
+
+
+def allow_command(argv: list[str]) -> int:
+    path = grant_file()
+    if argv in ([], ["--list"]):
+        grant = read_grant()
+        print(grant.status() if grant else NO_GRANT)
+        with contextlib.suppress(RuntimeError, ValueError):
+            print("Window classes open now: " + ", ".join(sorted({c["class"] for c in hypr_json("clients")
+                                                                  if c.get("class")})))
+        return 0
+    if argv == ["--off"]:
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(path)
+        print("Grant off. " + NO_GRANT)
+        return 0
+    args, until = list(argv), None
+    for i, arg in enumerate(args):
+        if arg == "--for" or arg.startswith("--for="):
+            spec = arg[6:] if "=" in arg else (args[i + 1] if i + 1 < len(args) else "")
+            del args[i:i + (1 if "=" in arg else 2)]
+            m = DURATION.fullmatch(spec)
+            if not spec or not m:
+                print(f"--for takes a duration such as 30m, 2h or 1h30m, not {spec!r}", file=sys.stderr)
+                return 2
+            until = time.time() + sum(int(n or 0) * k for n, k in zip(m.groups(), (3600, 60, 1)))
+            break
+    apps = list(dict.fromkeys(a.strip().lower() for arg in args for a in arg.split(",") if a.strip()))
+    if not apps or any(a.startswith("-") for a in apps):
+        print(ALLOW_USAGE, file=sys.stderr)
+        return 2
+    tmp = f"{path}.{os.getpid()}"
+    write_private(tmp, json.dumps({"apps": apps, "until": until}).encode(), os.O_TRUNC)
+    os.replace(tmp, path)
+    print(Grant(tuple(apps), until).status() + " Agents can still read the whole screen. "
+          "Undo: hypr-computer allow --off")
+    return 0
+
+
 if __name__ == "__main__":
     if "--version" in sys.argv[1:]:
         print(RUNNING_VERSION)
         sys.exit(0)
+    if sys.argv[1:2] == ["--allow"]:
+        sys.exit(allow_command(sys.argv[2:]))
     if "--check" in sys.argv[1:]:
         sys.exit(self_check())
     if "--stop" in sys.argv[1:]:
