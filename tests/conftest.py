@@ -16,6 +16,15 @@ def fresh_binaries():
     server.binary.cache_clear()
 
 
+@pytest.fixture(autouse=True)
+def no_real_desktop(monkeypatch, tmp_path_factory):
+    """Points every test, and every server it starts, at an empty runtime folder. Otherwise the server finds the
+    Hyprland session of the machine the tests run on, and acts on it."""
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path_factory.mktemp("run")))
+    monkeypatch.setenv("HYPRLAND_INSTANCE_SIGNATURE", "none")
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-none")
+
+
 @pytest.fixture
 def hypr(monkeypatch):
     fake = FakeHyprland()
