@@ -5,7 +5,7 @@
 If you're an agent asked to set up computer use on this machine:
 
 1. **Check support.** Run `hyprctl version | head -1`. You need **Hyprland 0.55 or newer**. If `hyprctl` is missing or older, stop and tell the user that other compositors aren't supported. Running over SSH, with a `tty` or empty `$XDG_SESSION_TYPE`, is fine.
-2. **Ask the user first.** Tell them what will be installed and wait for their OK. `sudo` is used only if `grim`, `wtype`, `xkbcli` or `uv` is missing. To show them the exact plan, run the command below with `--dry-run` first.
+2. **Ask the user first.** Tell them what will be installed and wait for their OK. `sudo` is used only if `grim`, `wtype`, `xkbcli`, `uv` or `wl-mirror` is missing. To show them the exact plan, run the command below with `--dry-run` first.
 3. **Install.** Replace `<client>` with the agent you're running in: `claude`, `codex`, `opencode`, `gemini` or `cursor`.
    ```bash
    curl -fsSL malik-na.github.io/hypr-computer | bash -s -- --yes --clients=<client>
@@ -13,7 +13,7 @@ If you're an agent asked to set up computer use on this machine:
    If `sudo` can't prompt from your environment, ask the user to run the command in a terminal.
 4. **Read the output.** The self-check prints one PASS, WARN or FAIL line per check and ends with `hypr-computer is ready.` Each FAIL line names its fix. A WARN line doesn't stop the install.
 5. **Other clients.** For VS Code, Zed, Goose, Cline or Windsurf, add the matching snippet from [Connecting your agent](docs/clients.md), with the absolute path `/home/<user>/.local/share/hypr-computer/server.py`.
-6. **Restart, then smoke test.** Ask the user to restart the agent. Then call `list_windows` and `screenshot`. If you can see the screenshot, setup is done. Don't click or type during the test unless the user asks.
+6. **Restart, then smoke test.** Ask the user to restart the agent. Then call `list_windows` and `screenshot`. If you can see the screenshot, setup is done. The screenshot shows your own screen, the agent display. Tell the user they can watch it with Super+0 or `hypr-computer watch`. Don't click or type during the test unless the user asks.
 
 ## Working on the code
 
