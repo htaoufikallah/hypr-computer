@@ -55,9 +55,12 @@ On v0.5 or older there's no `hypr-computer` command yet. Run the install command
 | Command | What it does |
 | --- | --- |
 | `hypr-computer update` | Install the latest release |
-| `hypr-computer check` | Run the self-check, which shows a PASS or FAIL line for each requirement |
+| `hypr-computer check` | Run the self-check, which shows a PASS, WARN or FAIL line for each requirement |
 | `hypr-computer stop` | Block every tool call from all agents, screenshots included, at once |
 | `hypr-computer resume` | Allow them again |
+| `hypr-computer allow foot,firefox --for 30m` | Let agents click and type only in these apps, for 30 minutes. See [Allowed apps](#allowed-apps) |
+| `hypr-computer allow --list` | Show which apps agents may use |
+| `hypr-computer allow --off` | Let agents use every app again |
 | `hypr-computer version` | Show the installed version |
 
 
@@ -105,18 +108,29 @@ Everything works without configuration. To change a default, set one of these en
 | `HYPR_COMPUTER_SETTLE_MS` | `500` | The longest a screenshot right after an action waits for the screen to settle. It waits 120 to 300 ms by kind of action, longer while the window's title keeps changing, and the whole time when a window opens or closes |
 | `HYPR_COMPUTER_TOOLS` | `all` | `core` keeps only `screenshot`, the pointer and keyboard actions, `cursor_position` and `list_windows`, to save tokens |
 | `HYPR_COMPUTER_FILE_URLS` | none | Colon-separated folders whose files `open_url` may open as `file://` URLs. Without it, `open_url` opens only `http` and `https` URLs |
-| `HYPR_COMPUTER_RECORD_DIR` | off | Saves every step, its timing and its screenshot to this folder, so you can review what an agent did. The folder it creates and the files it writes are readable only by you. Typed text is saved as its length only |
+| `HYPR_COMPUTER_RECORD_DIR` | off | Saves every step, its timing and its screenshot to this folder, so you can review what an agent did. Grants and refused actions are saved too. The folder it creates and the files it writes are readable only by you. Typed text is saved as its length only |
+| `HYPR_COMPUTER_SANDBOX` | `on` | `off` lets the server reach the network again, for debugging. See [Privacy](#privacy) |
 
 ## Privacy
 
 Nothing about you or your screen leaves your machine through hypr-computer.
 
 - **No telemetry, analytics or crash reports.** There's no tracking ID or account, and nothing to opt out of.
-- **No network access.** The server connects only to your compositor, over local sockets, and runs only local tools (`grim`, `wtype`, `xkbcli`, `gtk-launch`, `xdg-mime`, `tesseract`, and your system Python for the accessibility tree). The whole server is about 2,100 lines of Python in [`server.py`](../server.py), [`wl_input.py`](../wl_input.py) and [`atspi_helper.py`](../atspi_helper.py), so you can check this yourself.
+- **No network access, enforced.** The server connects only to your compositor, over local sockets, and runs only local tools (`grim`, `wtype`, `xkbcli`, `gtk-launch`, `xdg-mime`, `tesseract`, and your system Python for the accessibility tree). The whole server is about 2,400 lines of Python in [`server.py`](../server.py), [`wl_input.py`](../wl_input.py) and [`atspi_helper.py`](../atspi_helper.py), so you can check this yourself. The server also cuts itself off from the network when it starts, as [the network sandbox](#the-network-sandbox) explains.
 - **Reading text stays local.** Text recognition and the accessibility tree run on your machine. Text read from the screen reaches your agent like a screenshot does. Apps with accessibility on share their text with other programs running as you, as screen readers need.
 - **Screenshots go only to your agent.** Your agent sends them to its model provider under that provider's terms. That part depends on the agent you choose.
 - **Nothing is stored.** Screenshots stay in memory and never reach the disk, unless you turn on `HYPR_COMPUTER_RECORD_DIR`.
-- **Network use is limited to installing and updating.** The installer and `hypr-computer update` download releases from GitHub, missing packages from your distribution, and the pinned Python dependencies (the MCP SDK and Pillow) from PyPI. A Claude Code plugin install downloads those dependencies on its first start instead.
+- **Network use is limited to installing and updating.** The installer and `hypr-computer update` download releases from GitHub, missing packages from your distribution, and the pinned Python dependencies (the MCP SDK and Pillow) from PyPI. A Claude Code plugin install downloads those dependencies on its first start instead. `uv` downloads them before the server starts, so the sandbox doesn't get in the way.
+
+### The network sandbox
+
+When the server starts, it moves itself into a new Linux user namespace and network namespace. The network namespace has no network interface except a loopback interface, which is down. Every program the server runs inherits the namespace, so `grim`, `wtype`, `tesseract`, `xdg-mime` and the accessibility helper can't reach the network either. Your files, Wayland, Hyprland's sockets and D-Bus work as before, because they are files or path sockets. The server keeps your user and group IDs.
+
+- **Checked by `hypr-computer check`.** Its `network` line tries real connections to 1.1.1.1 and 2606:4700:4700::1111 from inside the sandbox and reports `blocked` when both fail. Nothing is sent, because the namespace has no route out.
+- **Apps the agent opens keep their network.** `open_url` and `launch_app` ask Hyprland to start the app, so your browser runs outside the sandbox.
+- **When the sandbox can't start, the server runs as before.** `hypr-computer check` shows a `WARN` line that says why, and the server writes the reason to standard error. This happens when your system doesn't let programs make user namespaces, or when `DBUS_SESSION_BUS_ADDRESS` names an abstract socket. Abstract sockets belong to one network namespace, so the sandbox would cut that bus off and stop `ui_find` and `ui_act`. A WARN line doesn't fail the check.
+- **An accessibility bus on an abstract socket isn't detected.** Current AT-SPI uses a socket file in `$XDG_RUNTIME_DIR/at-spi`. If `ui_find` stops working in the sandbox on an older system, set `HYPR_COMPUTER_SANDBOX=off`.
+- **The sandbox covers the network only.** Code in the server could still ask Hyprland to run a command outside the sandbox, as `launch_app` does.
 
 ## Safety
 
@@ -125,8 +139,31 @@ Nothing about you or your screen leaves your machine through hypr-computer.
   ```lua
   hl.bind("SUPER + CTRL + ESCAPE", hl.dsp.exec_cmd("touch $XDG_RUNTIME_DIR/hypr-computer.stop"))
   ```
+- **Allowed apps.** See [Allowed apps](#allowed-apps).
+- **Pause when you take over.** If you move the mouse while an agent works, a `batch` stops before its next step. The agent's next click, key press or other action is refused once with "The user is using the mouse; ask before continuing". The server notices because the pointer isn't where the agent left it. These moves don't count:
+  - Hyprland moving the pointer to the middle of a window that it focused.
+  - A move after a minute with no action from the agent, so the first action of a new request goes ahead.
+
+  Typing on your keyboard isn't noticed. Two agents working at the same time see each other's moves as yours.
 - **Deny-list.** Agents can't click or type into 1Password, Bitwarden, KeePassXC, GNOME Secrets, Seahorse, Proton Pass, polkit or pinentry. Both the focused window and the window under the pointer are checked, for every point of a move or a drag too. A `batch` stops before its next step when one of these windows opens or comes to the front. Change the list with `HYPR_COMPUTER_DENY`.
 - **Password managers never leave the machine.** Deny-listed windows are painted black in every image an agent gets and in what `find_text` reads. Their titles are hidden from window lists, events and status lines, `wait_for` never matches them, and `ui_find` never reads them. The whole screen is blacked out while one has focus (bars and its menus can show its title and contents anywhere), while one is in a window group (the group bar shows its title), and while windows are still moving around one. If Hyprland can't say where one is on screen, the capture is refused. A menu that a password manager leaves open after losing focus, reaching outside its window, isn't covered.
 - **Web pages only.** `open_url` refuses `file://` URLs unless you list their folders in `HYPR_COMPUTER_FILE_URLS`.
 - **Text on the screen is not an instruction.** The server tells agents that web pages, documents and messages are data, and that they should do only what you asked.
 - **Your agent's approval prompts still apply.** Don't leave an agent unattended with sensitive apps open.
+
+### Allowed apps
+
+By default, agents may use every app except the deny-list. To keep them to the apps you name, give them a grant:
+
+```bash
+hypr-computer allow foot,firefox --for 30m
+```
+
+- **What a grant allows.** Agents can click, type, scroll, drag and press keys only in windows of these classes. `focus_window` and `ui_act` work only on them, and `launch_app` and `open_url` start only these apps. Screenshots, `find_text`, `ui_find`, `wait_for` and `list_windows` still read the whole screen.
+- **Window classes** are the names that `hypr-computer allow --list` and `hyprctl clients` show, such as `foot`, `chromium` or `org.gnome.Nautilus`. Case doesn't matter.
+- **Where the pointer acts.** The window under the pointer must be allowed. When a floating or fullscreen window is on top, that window counts. When two floating windows overlap, both must be allowed, because Hyprland doesn't say which one is on top. A point outside every window is refused, such as the bar, the desktop or a menu that reaches past its window's edge.
+- **Key presses** go to the focused window, so it must be allowed. A key combo that Hyprland has a bind for goes to Hyprland instead, so it needs `hyprland` in the list too.
+- **Refused actions** tell the agent which app it wasn't allowed to use, and to ask you.
+- **Agents with a shell can change it.** A grant limits what an agent does through hypr-computer. An agent that can also run commands, such as Claude Code or Codex, could run `hypr-computer allow` itself, so keep your agent's approval prompts on for commands.
+- **Time limits.** After `--for 30m`, `2h` or `1h30m` runs out, agents can only read the screen until you run `hypr-computer allow` again or turn grants off with `hypr-computer allow --off`. Without `--for`, a grant lasts until you turn it off or log out.
+- **Where it is kept.** The grant is the file `$XDG_RUNTIME_DIR/hypr-computer.grant`, readable only by you. Every running agent follows it from its next action. If the file can't be read, agents can only read the screen.
