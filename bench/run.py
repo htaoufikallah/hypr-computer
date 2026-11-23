@@ -64,7 +64,8 @@ SESSION_ENV = ("export XDG_RUNTIME_DIR=/run/user/$(id -u); "
 def mcp_config(host: str, server: str, name: str, command: str | None, record_dir: str | None) -> str:
     browser = f"chromium --user-data-dir={BENCH}/chrome --no-first-run --no-default-browser-check"
     record = f" HYPR_COMPUTER_RECORD_DIR={shlex.quote(record_dir)}" if record_dir else ""
-    run = (SESSION_ENV + f"export HYPR_COMPUTER_BROWSER={shlex.quote(browser)} HYPR_COMPUTER_FILE_URLS={BENCH}/www"
+    run = (SESSION_ENV + f"export HYPR_COMPUTER_WORKSPACE=user HYPR_COMPUTER_BROWSER={shlex.quote(browser)} "
+           f"HYPR_COMPUTER_FILE_URLS={BENCH}/www"
            f"{record}; exec " + (command or f"uv run --quiet --script {server}"))
     if host == "local":
         entry = {"command": "bash", "args": ["-lc", run]}

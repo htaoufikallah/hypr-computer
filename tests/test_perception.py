@@ -356,6 +356,14 @@ def test_ui_find_reads_the_window_it_was_asked_for_and_skips_deny_listed_ones(at
     assert 'button "Apply changes"' in atspi.call("ui_find", query="apply")
 
 
+def test_ui_find_reads_the_agent_displays_window_by_default_not_the_users(atspi, monkeypatch):
+    monkeypatch.delenv("HYPR_COMPUTER_WORKSPACE")  # the agent works on its own display
+    with pytest.raises(Exception, match="no window on the agent display yet"):
+        atspi.call("ui_find", query="apply")
+    atspi.tree(chromium_page(APPLY))
+    assert 'button "Apply changes"' in atspi.call("ui_find", query="apply", window="chromium")
+
+
 def test_ui_find_never_reads_deny_listed_windows_or_elements(atspi):
     atspi.hypr.clients = [CHROMIUM, KEEPASS]
     atspi.tree(chromium_page(APPLY, toolbar=[element("page tab", "Bitwarden Web Vault", (0, 0, 200, 40))]))

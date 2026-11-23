@@ -1,8 +1,10 @@
 import json
 import os
 import re
+import shlex
 import shutil
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -12,15 +14,20 @@ M1_PANEL = {"id": 0, "name": "eDP-1", "x": 0, "y": 0, "width": 2560, "height": 1
             "transform": 0, "activeWorkspace": {"id": 9, "name": "9"}}
 
 
+LUA_STRING = r'"(?:[^"\\]|\\.)*"'
+
+
+def lua_value(v: str):
+    if v.startswith('"'):
+        return re.sub(r"\\(\d{3})", lambda m: chr(int(m[1])), v[1:-1])
+    return {"true": True, "false": False}[v] if v in ("true", "false") else json.loads(v)
+
+
 def lua_table(text: str) -> dict:
     """The fields of a flat Lua table literal, such as `{output = "x", scale = 1, default = true}`."""
-    def value(v: str):
-        if v.startswith('"'):
-            return re.sub(r"\\(\d{3})", lambda m: chr(int(m[1])), v[1:-1])
-        return {"true": True, "false": False}[v] if v in ("true", "false") else json.loads(v)
     nested = {k: lua_table(v) for k, v in re.findall(r"(\w+) = (\{[^{}]*\})", text)}
     flat = re.sub(r"\w+ = \{[^{}]*\}", "", text[1:-1] if text.startswith("{") else text)
-    return {**{k: value(v) for k, v in re.findall(r'(\w+) = ("(?:[^"\\]|\\.)*"|[^,}\s]+)', flat)}, **nested}
+    return {**{k: lua_value(v) for k, v in re.findall(rf'(\w+) = ({LUA_STRING}|[^,}}\s]+)', flat)}, **nested}
 
 
 def named_workspace(name: str) -> dict:
@@ -41,11 +48,15 @@ class FakeHyprland:
     monitor focuses that monitor and the window under the pointer; focusing a monitor puts the pointer in its
     middle and focuses its most recently focused window. `keys` is what the `input.keyboard.key` counter the
     server installs has counted, None until it is installed. `activate` is a window asking to be focused, which
-    Hyprland grants with `misc:focus_on_activate`, as Omarchy sets it, unless a window rule says otherwise."""
+    Hyprland grants with `misc:focus_on_activate`, as Omarchy sets it, unless a window rule says otherwise.
+
+    `exec_cmd` of wl-mirror starts a real process, whose window opens on the workspace the exec rules name, as
+    wl-mirror titles it, and closes when the process exits. Without " silent", Hyprland shows that workspace and
+    focuses the window. Other commands are only recorded."""
 
     def __init__(self, monitors=None, clients=None, active=None):
         self.root = tempfile.mkdtemp(prefix="hc", dir="/tmp")  # AF_UNIX paths max out at 108 bytes
-        self.monitors = monitors or [M1_PANEL]
+        self.monitors = [dict(m) for m in monitors or [M1_PANEL]]
         self.clients = clients or []
         self.active = active or {}
         self.cursor = (0, 0)
@@ -59,6 +70,7 @@ class FakeHyprland:
         self.binds: list[dict] = []
         self.animations = [[{"name": "global", "overridden": True, "enabled": True, "speed": 1.0}], []]
         self.requests: list[str] = []
+        self.processes: list[subprocess.Popen] = []
         self.on_request = lambda request: None
         self.readers: list[socket.socket] = []
         self.listen("fake")
@@ -176,7 +188,7 @@ class FakeHyprland:
             shown = [c for c in self.clients if (c.get("workspace") or {}).get("name") == m["activeWorkspace"]["name"]]
             self.active = min(shown, key=lambda c: c.get("focusHistoryID", 99), default={})
         elif name == "focus" and "workspace" in args:  # shows it on the monitor a rule binds it to, and focuses that
-            ws = args["workspace"].removeprefix("name:")
+            ws = str(args["workspace"]).removeprefix("name:")
             bound = next((r["monitor"] for r in self.workspace_rules if r["workspace"].removeprefix("name:") == ws), None)
             m = next(m for m in self.monitors if m["name"] == (bound or self.focused))
             m["activeWorkspace"] = named_workspace(ws)
@@ -192,7 +204,30 @@ class FakeHyprland:
             w["monitor"] = next((m["id"] for m in self.monitors if m["activeWorkspace"]["name"] == ws),
                                 next(m["id"] for m in self.monitors if m["name"] == self.focused))
 
+    def exec_cmd(self, request: str) -> None:
+        call = re.fullmatch(rf"/dispatch hl\.dsp\.exec_cmd\(({LUA_STRING})(?:, (\{{.*\}}))?\)", request, re.S)
+        argv, rules = shlex.split(lua_value(call[1])), lua_table(call[2] or "")
+        if os.path.basename(argv[0]) != "wl-mirror":
+            return
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        self.processes.append(proc)
+        here = next(m for m in self.monitors if m["name"] == self.focused)
+        ws, _, silent = rules.get("workspace", here["activeWorkspace"]["name"]).partition(" ")
+        title = argv[argv.index("--title") + 1] if "--title" in argv else f"Wayland Output Mirror for {argv[-1]}"
+        w = {"class": "at.yrlf.wl_mirror", "title": title, "address": f"0x{proc.pid:x}", "pid": proc.pid,
+             "at": [here["x"], here["y"]], "size": [here["width"] / here["scale"], here["height"] / here["scale"]],
+             "workspace": named_workspace(ws), "monitor": here["id"], "floating": False,
+             "focusHistoryID": len(self.clients), "hidden": False}
+        self.clients.append(w)
+        if silent != "silent":
+            here["activeWorkspace"], self.active = named_workspace(ws), w
+
     def reply(self, request: str) -> str:
+        gone = {f"0x{p.pid:x}" for p in self.processes if p.poll() is not None}
+        if gone & {c.get("address") for c in self.clients}:
+            self.clients[:] = [c for c in self.clients if c.get("address") not in gone]
+        if request.startswith("/dispatch hl.dsp.exec_cmd("):
+            self.exec_cmd(request)
         if request.startswith("/output "):
             return self.output(request)
         if request.startswith("/eval "):
@@ -248,6 +283,9 @@ class FakeHyprland:
 
     def close(self) -> None:
         self.stop()
+        for proc in self.processes:
+            proc.kill()
+            proc.wait()
         shutil.rmtree(self.root, ignore_errors=True)
 
 
@@ -379,10 +417,11 @@ for i, (left, top, right, bottom) in enumerate(sorted(patches, key=lambda p: (p[
 
 
 def fake_bin(directory: str, tesseract: bool = True) -> str:
-    """A folder with fake grim and tesseract, a hyprctl that must not run, and the test's python3, so a
-    PATH of this folder alone works."""
+    """A folder with fake grim and tesseract, a hyprctl that must not run, a wl-mirror that only Hyprland may
+    run, and the test's python3, so a PATH of this folder alone works."""
     os.makedirs(directory, exist_ok=True)
-    fakes = [("grim", FAKE_GRIM), ("hyprctl", "#!/bin/sh\necho 'hyprctl must not run' >&2\nexit 1\n")]
+    fakes = [("grim", FAKE_GRIM), ("hyprctl", "#!/bin/sh\necho 'hyprctl must not run' >&2\nexit 1\n"),
+             ("wl-mirror", "#!/bin/sh\necho 'wl-mirror must be started through Hyprland' >&2\nexit 1\n")]
     for name, body in fakes + ([("tesseract", FAKE_TESSERACT)] if tesseract else []):
         path = os.path.join(directory, name)
         with open(path, "w") as f:

@@ -5,7 +5,7 @@
 The installer:
 
 1. Downloads the latest release to `~/.local/share/hypr-computer`.
-2. Installs `grim`, `wtype`, `xkbcli` and `uv` with `sudo`, only if any of them is missing. On Omarchy they're usually all there, and no `sudo` is needed.
+2. Installs `grim`, `wtype`, `xkbcli`, `uv` and `wl-mirror` with `sudo`, only if any of them is missing. `wl-mirror` is optional. If it can't be installed, the install goes on without it, and you can't watch the agent's workspace.
 3. Downloads the Python dependencies at the versions pinned in `server.py.lock`, so agents start without network access.
 4. Runs a self-check, which clicks nothing and types no text.
 5. Registers hypr-computer with each agent you've used: Claude Code, Codex, opencode, Gemini CLI and Cursor.
@@ -56,6 +56,7 @@ On v0.5 or older there's no `hypr-computer` command yet. Run the install command
 | --- | --- |
 | `hypr-computer update` | Install the latest release |
 | `hypr-computer check` | Run the self-check, which shows a PASS, WARN or FAIL line for each requirement |
+| `hypr-computer watch` | Show the workspace where you watch the agent at work. If you closed its live view, it opens again. See [The agent display](#the-agent-display) |
 | `hypr-computer stop` | Block every tool call from all agents, screenshots included, at once |
 | `hypr-computer resume` | Allow them again |
 | `hypr-computer allow foot,firefox --for 30m` | Let agents click and type only in these apps, for 30 minutes. See [Allowed apps](#allowed-apps) |
@@ -70,10 +71,10 @@ These are the tools your agent gets:
 
 | Tool | What it does |
 | --- | --- |
-| `screenshot` | Captures every monitor as one image, once the screen has settled |
+| `screenshot` | Captures the agent display, or all your monitors as one image, once the screen has settled |
 | `click` | Left, right or middle click at a point; double and triple clicks too |
-| `type_text` | Types text into the focused window, including accents and other scripts |
-| `key` | Presses a key or shortcut such as `Return`, `ctrl+l` or `super+Return`; Hyprland keybinds work |
+| `type_text` | Types text into the focused window of the screen the agent works on. On your screen, accents and other scripts work too |
+| `key` | Presses a key or shortcut such as `Return`, `ctrl+l` or `super+Return` in the same window. On your screen, Hyprland keybinds work |
 | `scroll` | Scrolls up, down, left or right at a point |
 | `drag` | Drags with the left button from one point to another |
 | `move` | Moves the pointer, for example to hover |
@@ -85,11 +86,11 @@ These are the tools your agent gets:
 | `ui_act` | Presses, checks or focuses an element from `ui_find` through the app itself, then reports its new state |
 | `zoom` | Shows part of the screen at full resolution, for small text |
 | `open_url` | Opens a page in your default browser, optionally in a private window, and returns a screenshot once it has loaded |
-| `focus_window` | Brings a window forward by name, switching workspace if needed |
+| `focus_window` | Brings one of your windows forward by name, switching workspace if needed. The agent must be working on your screen |
 | `launch_app` | Starts an installed app by name |
 | `list_windows` | Lists open windows with their workspace, title and position |
 | `cursor_position` | Reports where the pointer is |
-| `agent_display` | Gives the agent a screen of its own, so you can keep using yours. See [The agent display](#the-agent-display) |
+| `agent_display` | Starts, stops or reports on the agent's own screen. See [The agent display](#the-agent-display) |
 
 `find_text`, `click_text` and `wait_for` text read the screen with [tesseract](https://github.com/tesseract-ocr/tesseract), which you install yourself: `sudo pacman -S tesseract tesseract-data-eng` (on Debian or Ubuntu, `sudo apt install tesseract-ocr`). `ui_find` and `ui_act` need your system Python with `python-gobject` and `at-spi2-core`, which most desktops already have. `hypr-computer check` reports both as optional.
 
@@ -97,16 +98,19 @@ Apps started with `launch_app` or `open_url` get their accessibility tree switch
 
 ### The agent display
 
-`agent_display(action="start")` adds a screen that only the agent uses, so it can work while you keep using your own. `action="stop"` removes it, and `action="status"` reports on it.
+The agent works on a screen of its own, the agent display, so you can keep using yours. It starts by itself the first time the agent opens an app or a page, takes a screenshot or acts, unless that call names your screen. `agent_display(action="start")` starts it too, `action="stop"` removes it, and `action="status"` reports on it and on where to watch it. To have agents work on your screen, as in v0.7, set `HYPR_COMPUTER_WORKSPACE=user`.
 
+- **Watching it.** When the agent display starts, `wl-mirror` shows a live view of it on your workspace 10. You stay on your workspace, and the live view never takes your focus. To see what the agent is doing, press Super+0 or run `hypr-computer watch`. To watch on another workspace, set `HYPR_COMPUTER_VIEW_WORKSPACE`. The live view closes when the agent display stops or the agent exits. It isn't on the agent display, so the agent's screenshots of its display never show it. While a password manager is on the agent display, the live view is blacked out of screenshots of your screen.
+- **Without `wl-mirror`.** The agent still works on its display, and it tells you to run `sudo pacman -S wl-mirror`. `hypr-computer check` shows a WARN line for it.
+- **Your screen.** The agent uses your screen only when a call names it: `target="user"` on `screenshot`, `zoom` or `find_text`, or `where="user"` on `launch_app` or `open_url`. After `target="user"`, later calls stay on your screen. The agent is told to do this only when the task needs your own windows or logged-in apps, and to ask you first. `focus_window` switches your workspace, so it's refused until the agent works on your screen.
 - **What it is.** It's a virtual monitor, a Hyprland headless output named `hypr-computer`, showing a workspace of the same name. It's 1280x800 at scale 2, or narrower if you lower `HYPR_COMPUTER_MAX_EDGE`, so screenshots show it at full size and text on it is sharp enough to read. It sits 1,000 pixels above and to the left of your monitors, so your pointer can't wander onto it. Your monitors, workspaces, focus and pointer stay as they were. Apps on it can't take your focus, even when they ask to, as a browser does when it opens a page in a new tab.
-- **Opening apps.** While it's on, `launch_app` and `open_url` open apps on it, where you don't see them. With `where="user"` they open on your screen instead.
+- **Opening apps.** `launch_app` and `open_url` open apps on the agent display, where you see them only in the live view. With `where="user"` they open on your screen instead.
 - **A browser of its own.** On the agent display, `open_url` runs Chromium-based browsers and Firefox with a separate profile in `$XDG_RUNTIME_DIR/hypr-computer-browser`. The page doesn't open in your browser's window, and it doesn't get your logins. The profile is deleted when you log out. A `HYPR_COMPUTER_BROWSER` command that names its own profile keeps that profile.
 - **Seeing it.** `screenshot`, `zoom` and `find_text` take `target="agent"` or `target="user"`. Later calls stay on the display the agent saw last, and coordinates refer to it. `list_windows` marks the windows on the agent display. Password managers are blacked out there too.
-- **Typing.** `type_text` and `key` with `window=` type into a window on the agent display. Hyprland gives that window the keyboard for each key and then gives it back to your window, so your focus and pointer don't move. Your using the mouse doesn't pause this typing. Allowed apps and the deny-list apply to the window typed into.
+- **Typing.** While the agent works on the agent display, `type_text` and `key` type into its window there. With several windows there, `window=` must name one. They never type into your focused window. Hyprland gives that window the keyboard for each key and then gives it back to your window, so your focus and pointer don't move. Your using the mouse doesn't pause this typing. Allowed apps and the deny-list apply to the window typed into.
 - **Clicking.** There's one pointer, so a click or a scroll on the agent display borrows yours. Once you've left the mouse and keyboard alone for 2 seconds, the agent moves the pointer there, clicks, and puts back the pointer and your keyboard focus. On the M1, your pointer is away for less than 20 ms. While you're using the mouse or keyboard, the click is refused, and the agent is told to use keys or `ui_act`. `move` and `drag` work only on your screen.
 - **Counting key presses.** To know when you're typing, the server adds a small handler to Hyprland that counts key presses, not which keys. Stopping the display removes it.
-- **Stopping.** Stopping moves the display's windows to the hidden workspace `special:hypr-computer`, and starting it again brings them back. To see these windows yourself, run `hyprctl dispatch 'hl.dsp.workspace.toggle_special("hypr-computer")'`. Hyprland moves your pointer when it removes the display, and the server puts it back within a few milliseconds. The display also stops when the agent that started it exits. If an agent crashed and left one behind, `status` finds it by name, and the next `start` takes it over.
+- **Stopping.** Stopping closes the live view and moves the display's windows to the hidden workspace `special:hypr-computer`. Starting it again brings them back. Once the agent stops it, the agent display starts again only when the agent starts it, or opens an app or a page. To see these windows yourself, run `hyprctl dispatch 'hl.dsp.workspace.toggle_special("hypr-computer")'`. Hyprland moves your pointer when it removes the display, and the server puts it back within a few milliseconds. The display also stops when the agent that started it exits. If an agent crashed and left one behind, `status` finds it by name, and the next `start` takes it over.
 
 Its limits:
 
@@ -117,6 +121,8 @@ Its limits:
 - An app that's already running may open its new window on your screen.
 - Tools that capture your whole desktop, rather than one monitor, also capture the agent display and the gap around it.
 - A Hyprland config reload resets the display's size and place until the agent next uses it.
+- `wait_for` with `title` or `focus` watches your focused window, not the windows on the agent display.
+- Two agents that work on their own display share one agent display.
 
 Every action takes `screenshot=true` to return the updated screen in the same call. `batch`, `open_url` and `wait_for` return one unless you pass `screenshot=false`. If the screen is identical to the last screenshot, the result says so instead of repeating the image. Each action's result also names the active window and the pointer position, and lists what Hyprland reported meanwhile: windows that opened or closed, focus and title changes. Coordinates are always pixels in the most recent screenshot.
 
@@ -130,7 +136,9 @@ Everything works without configuration. To change a default, set one of these en
 | `HYPR_COMPUTER_BROWSER` | your default browser | Browser command for `open_url`, such as `firefox` |
 | `HYPR_COMPUTER_MAX_EDGE` | `1456` | Screenshot size (long edge, in pixels). Lower it for models with a smaller image limit |
 | `HYPR_COMPUTER_SETTLE_MS` | `500` | The longest a screenshot right after an action waits for the screen to settle. It waits 120 to 300 ms by kind of action, longer while the window's title keeps changing, and the whole time when a window opens or closes |
-| `HYPR_COMPUTER_TOOLS` | `all` | `core` keeps only `screenshot`, the pointer and keyboard actions, `cursor_position` and `list_windows`, to save tokens |
+| `HYPR_COMPUTER_WORKSPACE` | `agent` | `agent` has agents work on [the agent display](#the-agent-display) unless they ask for your screen. `user` has them work on your screen, as in v0.7 |
+| `HYPR_COMPUTER_VIEW_WORKSPACE` | `10` | The workspace where you watch the agent display |
+| `HYPR_COMPUTER_TOOLS` | `all` | `core` keeps only `screenshot`, the pointer and keyboard actions, `cursor_position` and `list_windows`, to save tokens. With `core`, agents work on your screen |
 | `HYPR_COMPUTER_FILE_URLS` | none | Colon-separated folders whose files `open_url` may open as `file://` URLs. Without it, `open_url` opens only `http` and `https` URLs |
 | `HYPR_COMPUTER_RECORD_DIR` | off | Saves every step, its timing and its screenshot to this folder, so you can review what an agent did. Grants and refused actions are saved too. The folder it creates and the files it writes are readable only by you. Typed text is saved as its length only |
 | `HYPR_COMPUTER_SANDBOX` | `on` | `off` lets the server reach the network again, for debugging. See [Privacy](#privacy) |
@@ -140,7 +148,7 @@ Everything works without configuration. To change a default, set one of these en
 Nothing about you or your screen leaves your machine through hypr-computer.
 
 - **No telemetry, analytics or crash reports.** There's no tracking ID or account, and nothing to opt out of.
-- **No network access, enforced.** The server connects only to your compositor, over local sockets, and runs only local tools (`grim`, `wtype`, `xkbcli`, `gtk-launch`, `xdg-mime`, `tesseract`, and your system Python for the accessibility tree). The whole server is about 2,400 lines of Python in [`server.py`](../server.py), [`wl_input.py`](../wl_input.py) and [`atspi_helper.py`](../atspi_helper.py), so you can check this yourself. The server also cuts itself off from the network when it starts, as [the network sandbox](#the-network-sandbox) explains.
+- **No network access, enforced.** The server connects only to your compositor, over local sockets, and runs only local tools (`grim`, `wtype`, `xkbcli`, `gtk-launch`, `xdg-mime`, `tesseract`, `wl-mirror`, and your system Python for the accessibility tree). The whole server is about 3,000 lines of Python in [`server.py`](../server.py), [`wl_input.py`](../wl_input.py) and [`atspi_helper.py`](../atspi_helper.py), so you can check this yourself. The server also cuts itself off from the network when it starts, as [the network sandbox](#the-network-sandbox) explains.
 - **Reading text stays local.** Text recognition and the accessibility tree run on your machine. Text read from the screen reaches your agent like a screenshot does. Apps with accessibility on share their text with other programs running as you, as screen readers need.
 - **Screenshots go only to your agent.** Your agent sends them to its model provider under that provider's terms. That part depends on the agent you choose.
 - **Nothing is stored.** Screenshots stay in memory and never reach the disk, unless you turn on `HYPR_COMPUTER_RECORD_DIR`.
@@ -158,7 +166,7 @@ When the server starts, it moves itself into a new Linux user namespace and netw
 
 ## Safety
 
-- **On-screen notice.** When an agent starts acting after a minute of quiet, Hyprland shows "An AI agent is controlling this desktop", with how to stop it.
+- **On-screen notice.** When an agent starts the agent display, or starts acting after a minute of quiet, Hyprland shows a notice with how to stop it. On the agent display, it says "An AI agent is working on its own workspace" and where to watch it. On your screen, it says "An AI agent is controlling this desktop".
 - **Stop switch.** `hypr-computer stop` blocks every tool call from all agents, screenshots included, until you run `hypr-computer resume`. A drag in progress stops at its next step. Agents are told to ask you before going on. To bind it to a key, add this to your Hyprland Lua config:
   ```lua
   hl.bind("SUPER + CTRL + ESCAPE", hl.dsp.exec_cmd("touch $XDG_RUNTIME_DIR/hypr-computer.stop"))

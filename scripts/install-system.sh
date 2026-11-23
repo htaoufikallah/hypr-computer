@@ -18,4 +18,13 @@ else
   echo "Missing: ${need[*]}. Install them with your package manager, then re-run." >&2
   exit 1
 fi
+no_view() { echo "wl-mirror is optional and not installed. To watch the agent at work: sudo pacman -S wl-mirror" >&2; }
+if command -v wl-mirror >/dev/null; then
+  say "wl-mirror is already installed"
+elif command -v pacman >/dev/null; then
+  say "Installing wl-mirror (sudo)"
+  sudo pacman -S --needed --noconfirm wl-mirror || no_view
+else
+  no_view
+fi
 say "System setup done."

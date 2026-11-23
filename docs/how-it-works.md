@@ -52,7 +52,7 @@ These benchmarks are small: a handful of tasks on two machines. Run them yoursel
 - Hyprland only.
 - Shortcuts use US key positions: `ctrl+z` always means the key labelled Z on a US keyboard.
 - Accessibility trees depend on the app. Chromium shows its pages only when started with accessibility on, and terminals have none.
-- One agent at a time. Agents share your real pointer and keyboard focus, except for typing on [the agent display](reference.md#the-agent-display), which borrows your pointer only to click.
+- One agent at a time. Agents share your real pointer and keyboard focus, except for typing on [the agent display](reference.md#the-agent-display), which borrows your pointer only to click. Two agents that work on their own display share one agent display.
 
 ## Acknowledgements
 

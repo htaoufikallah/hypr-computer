@@ -11,6 +11,7 @@ case "${1:-help}" in
   stop)    server --stop ;;
   resume)  server --resume ;;
   allow)   shift; server --allow "$@" ;;
+  watch)   server --watch ;;
   *)
     cat <<EOF
 usage: hypr-computer <command>
@@ -20,6 +21,7 @@ usage: hypr-computer <command>
   version   print the installed version
   stop      block every tool call of every running agent at once
   resume    allow actions again
+  watch     show the workspace where you can watch the agent at work
   allow APP[,APP...] [--for 30m]
             let agents click and type only in these apps (window classes); screen reading still works
   allow --list    show what agents may use

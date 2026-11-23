@@ -16,6 +16,15 @@ def fresh_binaries():
     server.binary.cache_clear()
 
 
+@pytest.fixture(autouse=True)
+def no_real_desktop(monkeypatch, tmp_path_factory):
+    """Points every test, and every server it starts, at an empty runtime folder. Otherwise the server finds the
+    Hyprland session of the machine the tests run on, and acts on it."""
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path_factory.mktemp("run")))
+    monkeypatch.setenv("HYPRLAND_INSTANCE_SIGNATURE", "none")
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-none")
+
+
 @pytest.fixture
 def hypr(monkeypatch):
     fake = FakeHyprland()
@@ -46,6 +55,7 @@ class Desktop:
 
 @pytest.fixture
 def desktop(hypr, monkeypatch):
+    """In HYPR_COMPUTER_WORKSPACE=user, which works on the user's screen as v0.7 did, and without wl-mirror."""
     vi = FakeInput()
     monkeypatch.setattr(server, "_input", vi)
     monkeypatch.setattr(server, "SETTLE_S", 0)
@@ -59,9 +69,14 @@ def desktop(hypr, monkeypatch):
     monkeypatch.setattr(server, "_goals", {})
     monkeypatch.setattr(server, "_pointer", None)
     monkeypatch.setattr(server, "_grant_noted", server.NO_GRANT)
-    monkeypatch.setattr(server, "_view", "user")
+    monkeypatch.setattr(server, "_view", "")
+    monkeypatch.setattr(server, "_note", "")
+    monkeypatch.setattr(server, "_noticed", 0.0)
     monkeypatch.setattr(server, "_started", False)
     monkeypatch.setattr(server, "_still", None)
+    monkeypatch.setattr(server, "WL_MIRROR", os.path.join(hypr.root, "no-wl-mirror"))
+    monkeypatch.setenv("HYPR_COMPUTER_WORKSPACE", "user")
+    monkeypatch.delenv("HYPR_COMPUTER_VIEW_WORKSPACE", raising=False)
     monkeypatch.delenv("HYPR_COMPUTER_TOOLS", raising=False)
     monkeypatch.delenv("HYPR_COMPUTER_RECORD_DIR", raising=False)
     d = Desktop(hypr, vi)

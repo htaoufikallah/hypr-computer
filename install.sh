@@ -64,6 +64,8 @@ for t in grim wtype xkbcli uv; do command -v "$t" >/dev/null || MISSING+=("$t");
 if [ "$SYSTEM" = 1 ] && [ "${#MISSING[@]}" -gt 0 ] && ! command -v pacman >/dev/null; then
   die "missing ${MISSING[*]}; install them with your package manager, then re-run with --no-system."
 fi
+INSTALL=("${MISSING[@]}")
+if command -v pacman >/dev/null && ! command -v wl-mirror >/dev/null; then INSTALL+=(wl-mirror); fi
 
 # Checking `command -v` is not enough: Omarchy (mise "lazy" tools) puts shims on PATH for
 # agents that aren't installed yet, and running one downloads the whole agent.
@@ -89,8 +91,8 @@ bold ""
 bold "hypr-computer will:"
 if [ -e "$DIR" ]; then info "1. update $DIR (now $(version_of "$DIR")) to $REF"
 else info "1. download $REF of $REPO to $DIR"; fi
-if [ "$SYSTEM" = 1 ] && [ "${#MISSING[@]}" -gt 0 ]; then
-  info "2. use sudo to install missing packages: ${MISSING[*]}"
+if [ "$SYSTEM" = 1 ] && [ "${#INSTALL[@]}" -gt 0 ]; then
+  info "2. use sudo to install missing packages: ${INSTALL[*]}"
 else
   info "2. no system changes needed (no sudo)"
 fi
@@ -178,7 +180,7 @@ step "The hypr-computer command"
 BIN="$HOME/.local/bin"
 run mkdir -p "$BIN"
 run ln -sfn "$DIR/bin/hypr-computer" "$BIN/hypr-computer"
-info "$BIN/hypr-computer (update, check, stop, resume, version)"
+info "$BIN/hypr-computer (update, check, stop, resume, watch, version)"
 case ":$PATH:" in *":$BIN:"*) ;; *) warn "$BIN is not on your PATH; add it to use the command" ;; esac
 
 SERVER="$DIR/server.py"

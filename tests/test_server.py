@@ -374,7 +374,12 @@ def test_every_hyprland_dispatch_goes_through_dispatch():
                      "dispatch('name', {...}) so the Lua syntax is generated")
 
 
-def test_batch_stops_at_the_first_failing_step():
+def test_tests_cannot_reach_the_hyprland_of_the_machine_they_run_on():
+    with pytest.raises(RuntimeError, match="can't reach Hyprland"):
+        server.hypr_json("monitors")
+
+
+def test_batch_stops_at_the_first_failing_step(desktop):
     log, ok = server.run_steps([{"action": "wait", "ms": 0}, {"action": "key", "combo": "ctrl+nope"},
                                 {"action": "wait", "ms": 0}])
     assert not ok and len(log) == 2 and log[0] == "step 1: waited 0 ms"
